@@ -15,6 +15,8 @@
  * Software Foundation; version 2 of the License.
  */
 
+#define DEBUG
+
 #include <linux/kernel.h>
 #include <linux/dmi.h>
 #include <linux/firmware.h>
@@ -54,9 +56,9 @@ struct goodix_ts_data {
 #define GOODIX_GPIO_INT_NAME		"irq"
 #define GOODIX_GPIO_RST_NAME		"reset"
 
-#define GOODIX_MAX_HEIGHT		4096
-#define GOODIX_MAX_WIDTH		4096
-#define GOODIX_INT_TRIGGER		1
+#define GOODIX_MAX_HEIGHT			4096
+#define GOODIX_MAX_WIDTH			4096
+#define GOODIX_INT_TRIGGER			1
 #define GOODIX_CONTACT_SIZE		8
 #define GOODIX_MAX_CONTACTS		10
 
@@ -65,16 +67,16 @@ struct goodix_ts_data {
 #define GOODIX_CONFIG_967_LENGTH	228
 
 /* Register defines */
-#define GOODIX_REG_COMMAND		0x8040
+#define GOODIX_REG_COMMAND			0x8040
 #define GOODIX_CMD_SCREEN_OFF		0x05
 
 #define GOODIX_READ_COOR_ADDR		0x814E
-#define GOODIX_REG_CONFIG_DATA		0x8047
-#define GOODIX_REG_ID			0x8140
+#define GOODIX_REG_CONFIG_DATA	0x8047
+#define GOODIX_REG_ID				0x8140
 
-#define RESOLUTION_LOC		1
-#define MAX_CONTACTS_LOC	5
-#define TRIGGER_LOC		6
+#define RESOLUTION_LOC				1
+#define MAX_CONTACTS_LOC			5
+#define TRIGGER_LOC					6
 
 static const unsigned long goodix_irq_flags[] = {
 	IRQ_TYPE_EDGE_RISING,
@@ -82,6 +84,10 @@ static const unsigned long goodix_irq_flags[] = {
 	IRQ_TYPE_LEVEL_LOW,
 	IRQ_TYPE_LEVEL_HIGH,
 };
+
+static ushort do_reset = 0;
+module_param(do_reset, ushort, S_IRUGO);
+MODULE_PARM_DESC(do_reset, "1 = do hard chip reset & FW-load on init, 2 = TBD, 0 - no reset (default)");
 
 /*
  * Those tablets have their coordinates origin at the bottom right
@@ -123,6 +129,32 @@ static const struct dmi_system_id goodix_gpios_int_first_support[] = {
 #endif
 	{}
 };
+
+
+static void goodix_dump_gpio_state(struct goodix_ts_data *ts, const char *realm)
+{
+	if (ts->gpiod_rst) {
+		dev_dbg(&ts->client->dev, "[%s] GPIO-RST: dir %u / val %u / valRaw %u\n", 
+			realm,
+			gpiod_get_direction(ts->gpiod_rst), 
+			gpiod_get_value(ts->gpiod_rst), 
+			gpiod_get_raw_value(ts->gpiod_rst)
+		);
+	} else {
+		dev_dbg(&ts->client->dev, "[%s] GPIO-RST: not available\n", realm);
+	}
+
+	if (ts->gpiod_int) {
+		dev_dbg(&ts->client->dev, "[%s] GPIO-INT: dir %u / val %u / valRaw %u\n", 
+			realm,
+			gpiod_get_direction(ts->gpiod_int), 
+			gpiod_get_value(ts->gpiod_int), 
+			gpiod_get_raw_value(ts->gpiod_int)
+		);
+	} else {
+		dev_dbg(&ts->client->dev, "[%s] GPIO-INT: not available\n", realm);
+	}
+}
 
 
 /**
@@ -242,6 +274,8 @@ static int goodix_ts_read_input_report(struct goodix_ts_data *ts, u8 *data)
 			return error;
 	}
 
+	dev_dbg(&ts->client->dev, "goodix_ts_read_input_report(): Touch num %u", touch_num);
+
 	return touch_num;
 }
 
@@ -287,8 +321,11 @@ static void goodix_process_events(struct goodix_ts_data *ts)
 		return;
 
 	/*
-	 * Bit 4 of the first byte reports the status of the capacitive
-	 * Windows/Home button.
+	 * Bit 4 of the first byte reports the status of the capacitive Windows/Home button.
+	 *
+	 * Note: According to the datasheet, it could be that it actually reports OR-ed state of all buttons,
+	 * and individual button states are at GOODIX_READ_COOR_ADDR + (1 + GOODIX_CONTACT_SIZE * GOODIX_MAX_CONTACTS), 
+	 * i.e. right after last touch-point's data block. In the datasheet that reg is named 'keyvalue'
 	 */
 	input_report_key(ts->input_dev, KEY_LEFTMETA, !!(point_data[0] & BIT(4)));
 
@@ -310,6 +347,9 @@ static irqreturn_t goodix_ts_irq_handler(int irq, void *dev_id)
 {
 	struct goodix_ts_data *ts = dev_id;
 
+	dev_dbg(&ts->client->dev, "goodix_ts_irq_handler(%u)", irq);
+	goodix_dump_gpio_state(ts, "irq-hndl");
+
 	goodix_process_events(ts);
 
 	if (goodix_i2c_write_u8(ts->client, GOODIX_READ_COOR_ADDR, 0) < 0)
@@ -320,11 +360,15 @@ static irqreturn_t goodix_ts_irq_handler(int irq, void *dev_id)
 
 static void goodix_free_irq(struct goodix_ts_data *ts)
 {
+	dev_dbg(&ts->client->dev, "goodix_free_irq(%u)", ts->client->irq);
 	devm_free_irq(&ts->client->dev, ts->client->irq, ts);
 }
 
 static int goodix_request_irq(struct goodix_ts_data *ts)
 {
+	dev_dbg(&ts->client->dev, "goodix_request_irq(%u)", ts->client->irq);
+	goodix_dump_gpio_state(ts, "req-irq");
+
 	return devm_request_threaded_irq(&ts->client->dev, ts->client->irq,
 					 NULL, goodix_ts_irq_handler,
 					 ts->irq_flags, ts->client->name, ts);
@@ -423,34 +467,68 @@ static int goodix_reset(struct goodix_ts_data *ts)
 {
 	int error;
 
+	goodix_dump_gpio_state(ts, "be4 HR");
+
 	/* begin select I2C slave addr */
-	error = gpiod_direction_output(ts->gpiod_rst, 0);
+	//error = gpiod_direction_output(ts->gpiod_int, 0);
+	error = gpiod_direction_output_raw(ts->gpiod_int, 0); //ignoring AL flag
+	if (error)
+		return error;
+	//error = gpiod_direction_output(ts->gpiod_rst, 0);
+	error = gpiod_direction_output_raw(ts->gpiod_rst, 1); //inverted RST
 	if (error)
 		return error;
 
+	//this seem to be necessary only at poweron-time, to allow voltage to settle
 	msleep(20);				/* T2: > 10ms */
+	goodix_dump_gpio_state(ts, "HR-start");
 
 	/* HIGH: 0x28/0x29, LOW: 0xBA/0xBB */
-	error = gpiod_direction_output(ts->gpiod_int, ts->client->addr == 0x14);
+	//error = gpiod_direction_output(ts->gpiod_int, ts->client->addr == 0x14);
+	error = gpiod_direction_output_raw(ts->gpiod_int, 1);
 	if (error)
 		return error;
 
 	usleep_range(100, 2000);		/* T3: > 100us */
 
-	error = gpiod_direction_output(ts->gpiod_rst, 1);
+	//error = gpiod_direction_output(ts->gpiod_rst, 1);
+	error = gpiod_direction_output_raw(ts->gpiod_rst, 0); //inverted RST
 	if (error)
 		return error;
 
 	usleep_range(6000, 10000);		/* T4: > 5ms */
 
+	goodix_dump_gpio_state(ts, "int1-rst1");
+
+	/*	Further sequence is unclear. 
+	 *	Some datasheets (e.g. GT968) specify switching straight to input at this point, letting GT IC to drive INT line,
+	 *	while others (e.g. GT911) show additional OUT-LOW - msleep(50) sequence for INT-pin before switching it to input.
+	 */
+	//error = gpiod_direction_output(ts->gpiod_int, 0);
+	//this seems to actually be necessary with corrected reset sequence
+	error = gpiod_direction_output_raw(ts->gpiod_int, 0);
+	if (error)
+		return error;
+	msleep(50);
+	goodix_dump_gpio_state(ts, "be4-inp");
+
+	error = gpiod_direction_input(ts->gpiod_int);
+	if (error)
+		return error;
+
 	/* end select I2C slave addr */
 	error = gpiod_direction_input(ts->gpiod_rst);
 	if (error)
 		return error;
+	//why is it necessary to switch RST back to input? w/o this I2C comm always fails
+	//may be there is signal inversion on rst line, e.g. a mosfet in between soc & gdix?
 
-	error = goodix_int_sync(ts);
+	/*error = goodix_int_sync(ts);
 	if (error)
-		return error;
+		return error;*/
+
+	msleep(5);
+	goodix_dump_gpio_state(ts, "rst-all-inp");
 
 	return 0;
 }
@@ -480,20 +558,22 @@ static int goodix_get_gpio_config(struct goodix_ts_data *ts)
 	dev = &ts->client->dev;
 
 	if (dmi_check_system(goodix_gpios_int_first_support) && ACPI_HANDLE(dev)) {
-		error = acpi_dev_add_driver_gpios(ACPI_COMPANION(dev), goodix_gpios_int_first);
+		error = devm_acpi_dev_add_driver_gpios(dev, goodix_gpios_int_first);
 		if (error)
 			return error;
-		dev_dbg(&ts->client->dev, "Applying gpios quirk\n");
+		dev_dbg(dev, "Applying gpios quirk\n");
 	}
 
 	/* Get the interrupt GPIO pin number */
 	gpiod = devm_gpiod_get_optional(dev, GOODIX_GPIO_INT_NAME, GPIOD_IN);
 	if (IS_ERR(gpiod)) {
 		error = PTR_ERR(gpiod);
+		dev_dbg(dev, "Get GPIO [%s] err: %d\n", GOODIX_GPIO_INT_NAME, error);
 		if (error != -EPROBE_DEFER)
 			dev_dbg(dev, "Failed to get %s GPIO: %d\n",
 				GOODIX_GPIO_INT_NAME, error);
-		goto out_err;
+		//goto out_err;
+		return error;
 	}
 
 	ts->gpiod_int = gpiod;
@@ -502,20 +582,37 @@ static int goodix_get_gpio_config(struct goodix_ts_data *ts)
 	gpiod = devm_gpiod_get_optional(dev, GOODIX_GPIO_RST_NAME, GPIOD_IN);
 	if (IS_ERR(gpiod)) {
 		error = PTR_ERR(gpiod);
+		dev_dbg(dev, "Get GPIO [%s] err: %d\n", GOODIX_GPIO_RST_NAME, error);
 		if (error != -EPROBE_DEFER)
 			dev_dbg(dev, "Failed to get %s GPIO: %d\n",
 				GOODIX_GPIO_RST_NAME, error);
-		goto out_err;
+		//goto out_err;
+		return error;
 	}
 
 	ts->gpiod_rst = gpiod;
 
+	if (ts->gpiod_int) {
+		dev_dbg(dev, "GPIO-INT can-sleep: %u / AL %u\n", 
+			gpiod_cansleep(ts->gpiod_int), 
+			gpiod_is_active_low(ts->gpiod_int)
+		);
+	}
+	if (ts->gpiod_rst) {
+		dev_dbg(dev, "GPIO-RST can-sleep: %u / AL %u\n", 
+			gpiod_cansleep(ts->gpiod_rst), 
+			gpiod_is_active_low(ts->gpiod_rst)
+		);
+	}
+	goodix_dump_gpio_state(ts, "just-ACQ");
+
 	return 0;
 
-out_err:
+//let devres to handle it
+/*out_err:
 	if (ACPI_HANDLE(dev))
 		acpi_dev_remove_driver_gpios(ACPI_COMPANION(dev));
-	return error;
+	return error; */
 }
 
 /**
@@ -529,6 +626,11 @@ static void goodix_read_config(struct goodix_ts_data *ts)
 {
 	u8 config[GOODIX_CONFIG_MAX_LENGTH];
 	int error;
+
+#if defined(DEBUG)
+	char hexdump[GOODIX_CONFIG_MAX_LENGTH * 2 + 1];
+	int i;
+#endif
 
 	error = goodix_i2c_read(ts->client, GOODIX_REG_CONFIG_DATA,
 				config, ts->cfg_len);
@@ -544,6 +646,11 @@ static void goodix_read_config(struct goodix_ts_data *ts)
 		ts->max_touch_num = GOODIX_MAX_CONTACTS;
 		return;
 	}
+
+#if defined(DEBUG)
+	for(i=0; i<ts->cfg_len; i++) scnprintf(hexdump + i*2, (GOODIX_CONFIG_MAX_LENGTH - i)*2 + 1, "%02X", config[i]);
+	dev_dbg(&ts->client->dev, "CFG data: %s\n", hexdump);
+#endif
 
 	ts->abs_x_max = get_unaligned_le16(&config[RESOLUTION_LOC]);
 	ts->abs_y_max = get_unaligned_le16(&config[RESOLUTION_LOC + 2]);
@@ -699,6 +806,7 @@ static int goodix_configure_dev(struct goodix_ts_data *ts)
 		return error;
 
 	ts->irq_flags = goodix_irq_flags[ts->int_trigger_type] | IRQF_ONESHOT;
+	dev_info(&ts->client->dev, "IRQ trig type %u, flags %lu\n", ts->int_trigger_type, ts->irq_flags);
 	error = goodix_request_irq(ts);
 	if (error) {
 		dev_err(&ts->client->dev, "request IRQ failed: %d\n", error);
@@ -741,7 +849,11 @@ static int goodix_ts_probe(struct i2c_client *client,
 	struct goodix_ts_data *ts;
 	int error;
 
-	dev_dbg(&client->dev, "I2C Address: 0x%02x\n", client->addr);
+	dev_dbg(&client->dev, "I2C Address: 0x%02x, IRQ: %u / trigType %u\n", 
+		client->addr, 
+		client->irq, 
+		irq_get_trigger_type(client->irq)
+	);
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		dev_err(&client->dev, "I2C check functionality failed.\n");
@@ -760,13 +872,45 @@ static int goodix_ts_probe(struct i2c_client *client,
 	if (error)
 		return error;
 
-	if (ts->gpiod_int && ts->gpiod_rst) {
-		/* reset the controller */
-		error = goodix_reset(ts);
-		if (error) {
-			dev_err(&client->dev, "Controller reset failed.\n");
-			return error;
+	if (ts->gpiod_int) {
+		dev_dbg(&client->dev, "ClientIRQ: %u, gpiod_to_irq()=%u\n", client->irq, gpiod_to_irq(ts->gpiod_int));
+#if defined(DEBUG)
+		if (gpiod_export(ts->gpiod_int, false) < 0) {
+			dev_err(&client->dev, "Failed to export GPIO-INT!.\n");
+		} else {
+			dev_dbg(&client->dev, "Exported GPIO-INT to sysfs\n");
 		}
+#endif
+	} else {
+		dev_err(&client->dev, "GPIO-INT not available!.\n");
+	}
+
+	if (ts->gpiod_rst) {
+#if defined(DEBUG)
+		if (gpiod_export(ts->gpiod_rst, false) < 0) {
+			dev_err(&client->dev, "Failed to export GPIO-RST!.\n");
+		} else {
+			dev_dbg(&client->dev, "Exported GPIO-RST to sysfs\n");
+		}
+#endif
+	} else {
+		dev_err(&client->dev, "GPIO-RST not available!.\n");
+	}
+
+	if (do_reset == 1) {
+		if (ts->gpiod_int && ts->gpiod_rst) {
+			/* reset the controller */
+			dev_dbg(&client->dev, "Hard-resetting device...");
+			error = goodix_reset(ts);
+			if (error) {
+				dev_err(&client->dev, "Controller hard-reset failed.\n");
+				return error;
+			}
+		} else {
+			dev_warn(&client->dev, "Skipping controller hard-reset due to GPIO int/rst not available.\n");
+		}
+	} else {
+		dev_dbg(&client->dev, "Skipping controller hard-reset due to do_reset=%u.\n", do_reset);
 	}
 
 	error = goodix_i2c_test(client);
@@ -783,13 +927,14 @@ static int goodix_ts_probe(struct i2c_client *client,
 
 	ts->cfg_len = goodix_get_cfg_len(ts->id);
 
-	if (ts->gpiod_int && ts->gpiod_rst) {
+	if (do_reset == 1 && ts->gpiod_int && ts->gpiod_rst) {
 		/* update device config */
 		ts->cfg_name = devm_kasprintf(&client->dev, GFP_KERNEL,
 					      "goodix_%d_cfg.bin", ts->id);
 		if (!ts->cfg_name)
 			return -ENOMEM;
 
+		dev_info(&client->dev, "Requesting firmware: %s, len %d\n", ts->cfg_name, ts->cfg_len);
 		error = request_firmware_nowait(THIS_MODULE, true, ts->cfg_name,
 						&client->dev, GFP_KERNEL, ts,
 						goodix_config_cb);
@@ -802,10 +947,13 @@ static int goodix_ts_probe(struct i2c_client *client,
 
 		return 0;
 	} else {
+		dev_dbg(&client->dev, "Skipping FW load, do_reset=%u.\n", do_reset);
 		error = goodix_configure_dev(ts);
 		if (error)
 			return error;
 	}
+
+	goodix_dump_gpio_state(ts, "prb done");
 
 	return 0;
 }
@@ -814,11 +962,14 @@ static int goodix_ts_remove(struct i2c_client *client)
 {
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 
-	if (ts->gpiod_int && ts->gpiod_rst)
+	if (do_reset == 1 && ts->gpiod_int && ts->gpiod_rst)
 		wait_for_completion(&ts->firmware_loading_complete);
 
-	if (ACPI_HANDLE(&ts->client->dev))
-		acpi_dev_remove_driver_gpios(ACPI_COMPANION(&ts->client->dev));
+	goodix_dump_gpio_state(ts, "rmv");
+
+	//now dev-managed
+	//if (ACPI_HANDLE(&ts->client->dev))
+	//	acpi_dev_remove_driver_gpios(ACPI_COMPANION(&ts->client->dev));
 
 	return 0;
 }
@@ -829,11 +980,16 @@ static int __maybe_unused goodix_suspend(struct device *dev)
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 	int error;
 
+	dev_dbg(dev, "goodix_suspend()\n");
+
 	/* We need gpio pins to suspend/resume */
 	if (!ts->gpiod_int || !ts->gpiod_rst)
 		return 0;
 
-	wait_for_completion(&ts->firmware_loading_complete);
+	goodix_dump_gpio_state(ts, "PM-S");
+
+	if (do_reset == 1)
+		wait_for_completion(&ts->firmware_loading_complete);
 
 	/* Free IRQ as IRQ pin is used as output in the suspend sequence */
 	goodix_free_irq(ts);
@@ -871,8 +1027,12 @@ static int __maybe_unused goodix_resume(struct device *dev)
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 	int error;
 
+	dev_dbg(dev, "goodix_resume()\n");
+
 	if (!ts->gpiod_int || !ts->gpiod_rst)
 		return 0;
+
+	goodix_dump_gpio_state(ts, "PM-R");
 
 	/*
 	 * Exit sleep mode by outputting HIGH level to INT pin
