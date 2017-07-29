@@ -46,6 +46,7 @@ struct goodix_ts_data {
 	int cfg_len;
 	struct gpio_desc *gpiod_int;
 	struct gpio_desc *gpiod_rst;
+	bool inverted_gpios;
 	u16 id;
 	u16 version;
 	const char *cfg_name;
@@ -85,9 +86,9 @@ static const unsigned long goodix_irq_flags[] = {
 	IRQ_TYPE_LEVEL_HIGH,
 };
 
-static ushort do_reset = 0;
+static ushort do_reset = 1;
 module_param(do_reset, ushort, S_IRUGO);
-MODULE_PARM_DESC(do_reset, "1 = do hard chip reset & FW-load on init, 2 = TBD, 0 - no reset (default)");
+MODULE_PARM_DESC(do_reset, "1 = do hard chip reset only (default), 2 = #1 + load FW afterwards, 0 - no reset");
 
 /*
  * Those tablets have their coordinates origin at the bottom right
@@ -366,7 +367,7 @@ static void goodix_free_irq(struct goodix_ts_data *ts)
 
 static int goodix_request_irq(struct goodix_ts_data *ts)
 {
-	dev_dbg(&ts->client->dev, "goodix_request_irq(%u)", ts->client->irq);
+	dev_dbg(&ts->client->dev, "goodix_request_irq(%u), type %u", ts->client->irq, irq_get_trigger_type(ts->client->irq));
 	goodix_dump_gpio_state(ts, "req-irq");
 
 	return devm_request_threaded_irq(&ts->client->dev, ts->client->irq,
@@ -445,11 +446,13 @@ static int goodix_int_sync(struct goodix_ts_data *ts)
 {
 	int error;
 
-	error = gpiod_direction_output(ts->gpiod_int, 0);
+	error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
 	if (error)
 		return error;
 
-	msleep(50);				/* T5: 50ms */
+	msleep(50);				//T5: 50ms
+
+	goodix_dump_gpio_state(ts, "intsync-be4-inp");
 
 	error = gpiod_direction_input(ts->gpiod_int);
 	if (error)
@@ -465,51 +468,78 @@ static int goodix_int_sync(struct goodix_ts_data *ts)
  */
 static int goodix_reset(struct goodix_ts_data *ts)
 {
+	/*	Chuwi-Hi12 notes
+	 *		_DSD is missing for TCS1 device, however INT gpio could still be aquired via acpi_dev_gpio_irq_get()
+	 *		which internally uses acpi_get_gpiod_by_index() to aquire gpio desc by _CRS idx
+	 *
+	 * 	RST is effectively ActiveHigh. Either there is a mosfet in between, or GT9111 has ActiveHigh reset, which is unlikely.
+	 *		I.e. set_raw_value(1) means put the IC into reset state, set_raw_value(0) - release reset and let the IC to go to active state
+	 *
+	 *		INT is ActiveHigh from output perspective, i.e. set_raw_value(1) results in HI level to be seen by GT IC
+	 *		However ACPI GpioInt() declares it as ActiveLow, so this line also requires inversion.
+	 *
+	 *		Attempts to override that AL flag via acpi_gpio_mapping gave no results, it is still AL no matter acpi_gpio_params.AcliveLow value
+	 *		Should some clean method to override it be found, don't forget to check IRQ trigType, it is initially derived from EgdeSpec+LvlSpec and so may change to edge_rising
+	 * 	For now simply working around that inversion with ts->inverted_gpios
+	 *
+	 *		TODO: dig deeper into gpiolib and i2c-core
+	 *		TODO: what is the reason of those (always exactly 4) spurious interrupts generated right after chip reset / wakeup?
+	 */
+
 	int error;
 
 	goodix_dump_gpio_state(ts, "be4 HR");
 
 	/* begin select I2C slave addr */
-	//error = gpiod_direction_output(ts->gpiod_int, 0);
-	error = gpiod_direction_output_raw(ts->gpiod_int, 0); //ignoring AL flag
+	//initial reset state as seen by GT IC: RST=0 (reset), INT=0
+	error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
+	//error = gpiod_direction_output_raw(ts->gpiod_int, 0); //ignoring AL flag
 	if (error)
 		return error;
-	//error = gpiod_direction_output(ts->gpiod_rst, 0);
-	error = gpiod_direction_output_raw(ts->gpiod_rst, 1); //inverted RST
+	error = gpiod_direction_output(ts->gpiod_rst, 0 ^ ts->inverted_gpios);
+	//error = gpiod_direction_output_raw(ts->gpiod_rst, 1); //inverted RST
 	if (error)
 		return error;
 
 	//this seem to be necessary only at poweron-time, to allow voltage to settle
-	msleep(20);				/* T2: > 10ms */
+	usleep_range(11000, 20000); //>10ms
 	goodix_dump_gpio_state(ts, "HR-start");
 
-	/* HIGH: 0x28/0x29, LOW: 0xBA/0xBB */
-	//error = gpiod_direction_output(ts->gpiod_int, ts->client->addr == 0x14);
-	error = gpiod_direction_output_raw(ts->gpiod_int, 1);
-	if (error)
-		return error;
+	//selecting I2C addr: HIGH: 0x28/0x29, LOW: 0xBA/0xBB
+	//state as seen by GT IC: RST=0 (reset), INT=1 for 0x14, 0 otherwise
+	gpiod_set_value(ts->gpiod_int, (ts->client->addr==0x14) ^ ts->inverted_gpios);
+	//error = gpiod_direction_output(ts->gpiod_int, (ts->client->addr==0x14) ^ ts->inverted_gpios);
+	//error = gpiod_direction_output_raw(ts->gpiod_int, 1);
+	//if (error)
+	//	return error;
 
-	usleep_range(100, 2000);		/* T3: > 100us */
+	usleep_range(150, 2000);		/* T3: > 100us */
 
-	//error = gpiod_direction_output(ts->gpiod_rst, 1);
-	error = gpiod_direction_output_raw(ts->gpiod_rst, 0); //inverted RST
-	if (error)
-		return error;
+	//releasing RST
+	//state as seen by GT IC: RST=1 (IC active), INT=1 for 0x14, 0 otherwise
+	gpiod_set_value(ts->gpiod_rst, 1 ^ ts->inverted_gpios);
+	//error = gpiod_direction_output(ts->gpiod_rst, 1 ^ ts->inverted_gpios);
+	//error = gpiod_direction_output_raw(ts->gpiod_rst, 0); //inverted RST
+	//if (error)
+	//	return error;
 
 	usleep_range(6000, 10000);		/* T4: > 5ms */
-
 	goodix_dump_gpio_state(ts, "int1-rst1");
 
 	/*	Further sequence is unclear. 
 	 *	Some datasheets (e.g. GT968) specify switching straight to input at this point, letting GT IC to drive INT line,
 	 *	while others (e.g. GT911) show additional OUT-LOW - msleep(50) sequence for INT-pin before switching it to input.
 	 */
-	//error = gpiod_direction_output(ts->gpiod_int, 0);
-	//this seems to actually be necessary with corrected reset sequence
-	error = gpiod_direction_output_raw(ts->gpiod_int, 0);
-	if (error)
-		return error;
+	//finishing addr sel
+	//state as seen by GT IC: RST=1 (IC active), INT=0
+	gpiod_set_value(ts->gpiod_int, 0 ^ ts->inverted_gpios);
+	//error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
+	//this seems to actually be necessary with corrected reset sequence, otherwise cfg_reg reads all-0
+	//error = gpiod_direction_output_raw(ts->gpiod_int, 0);
+	//if (error)
+	//	return error;
 	msleep(50);
+
 	goodix_dump_gpio_state(ts, "be4-inp");
 
 	error = gpiod_direction_input(ts->gpiod_int);
@@ -517,6 +547,8 @@ static int goodix_reset(struct goodix_ts_data *ts)
 		return error;
 
 	/* end select I2C slave addr */
+	//not really necessary (however may save a tiny-tiny-tiny-bit of pwr),
+	//but doesn't hurt either - there must be pull-up on GT RST# pin anyway
 	error = gpiod_direction_input(ts->gpiod_rst);
 	if (error)
 		return error;
@@ -527,18 +559,52 @@ static int goodix_reset(struct goodix_ts_data *ts)
 	if (error)
 		return error;*/
 
-	msleep(5);
-	goodix_dump_gpio_state(ts, "rst-all-inp");
+	//msleep(5);
+	//goodix_dump_gpio_state(ts, "rst-all-inp");
 
 	return 0;
 }
 
-static const struct acpi_gpio_params goodix_first_gpio = { 0, 0, false };
-static const struct acpi_gpio_params goodix_second_gpio = { 1, 0, false };
+static ssize_t goodix_config_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = i2c_verify_client(dev);
+	struct goodix_ts_data *ts = i2c_get_clientdata(client);
+
+	u8 config[GOODIX_CONFIG_MAX_LENGTH];
+	int error, count = 0, i;
+
+	error = goodix_i2c_read(client, GOODIX_REG_CONFIG_DATA, config, ts->cfg_len);
+	if (error) {
+		dev_warn(&client->dev, "Error reading config (%d)\n",  error);
+		return error;
+	} else {
+		dev_dbg(&client->dev, "Config read successfully\n");
+	}
+
+	for (i = 0; i < ts->cfg_len; i++)
+		count += scnprintf(buf + count, PAGE_SIZE - count, "%02X", config[i]);
+
+	return count;
+}
+
+static DEVICE_ATTR(config, S_IRUGO, goodix_config_show, NULL);
+
+static struct attribute *goodix_attrs[] = {
+	&dev_attr_config.attr,
+	NULL
+};
+
+static const struct attribute_group goodix_attr_group = {
+	.attrs = goodix_attrs,
+};
+
+
+static const struct acpi_gpio_params goodix_first_gpio = { 0, 0, true }; 	//declared as ActiveLow in ACPI GpioInt(), setting it false here has no effect
+static const struct acpi_gpio_params goodix_second_gpio = { 1, 0, false }; //this one has HW inversion (or GT9111 has active-hight RST - unlikely), so physical-high means reset-active
 
 static const struct acpi_gpio_mapping goodix_gpios_int_first[] = {
-	{ GOODIX_GPIO_INT_NAME "-gpio", &goodix_first_gpio, 1 },
-	{ GOODIX_GPIO_RST_NAME "-gpio", &goodix_second_gpio, 1 },
+	{ GOODIX_GPIO_INT_NAME "-gpios", &goodix_first_gpio, 1 },
+	{ GOODIX_GPIO_RST_NAME "-gpios", &goodix_second_gpio, 1 },
 	{ },
 };
 
@@ -561,6 +627,7 @@ static int goodix_get_gpio_config(struct goodix_ts_data *ts)
 		error = devm_acpi_dev_add_driver_gpios(dev, goodix_gpios_int_first);
 		if (error)
 			return error;
+		ts->inverted_gpios = true;
 		dev_dbg(dev, "Applying gpios quirk\n");
 	}
 
@@ -897,7 +964,7 @@ static int goodix_ts_probe(struct i2c_client *client,
 		dev_err(&client->dev, "GPIO-RST not available!.\n");
 	}
 
-	if (do_reset == 1) {
+	if (do_reset >= 1) {
 		if (ts->gpiod_int && ts->gpiod_rst) {
 			/* reset the controller */
 			dev_dbg(&client->dev, "Hard-resetting device...");
@@ -927,10 +994,8 @@ static int goodix_ts_probe(struct i2c_client *client,
 
 	ts->cfg_len = goodix_get_cfg_len(ts->id);
 
-	if (do_reset == 1 && ts->gpiod_int && ts->gpiod_rst) {
-		/* update device config */
-		ts->cfg_name = devm_kasprintf(&client->dev, GFP_KERNEL,
-					      "goodix_%d_cfg.bin", ts->id);
+	if (do_reset == 2 && ts->gpiod_int && ts->gpiod_rst) {
+		ts->cfg_name = devm_kasprintf(&client->dev, GFP_KERNEL, "goodix_%d_cfg.bin", ts->id);
 		if (!ts->cfg_name)
 			return -ENOMEM;
 
@@ -944,8 +1009,6 @@ static int goodix_ts_probe(struct i2c_client *client,
 				error);
 			return error;
 		}
-
-		return 0;
 	} else {
 		dev_dbg(&client->dev, "Skipping FW load, do_reset=%u.\n", do_reset);
 		error = goodix_configure_dev(ts);
@@ -955,6 +1018,12 @@ static int goodix_ts_probe(struct i2c_client *client,
 
 	goodix_dump_gpio_state(ts, "prb done");
 
+	error = sysfs_create_group(&client->dev.kobj, &goodix_attr_group);
+	if (error) {
+		dev_err(&client->dev, "Failed to create sysfs group: %d\n", error);
+		return error;
+	}
+
 	return 0;
 }
 
@@ -962,10 +1031,12 @@ static int goodix_ts_remove(struct i2c_client *client)
 {
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 
-	if (do_reset == 1 && ts->gpiod_int && ts->gpiod_rst)
+	if (do_reset == 2 && ts->gpiod_int && ts->gpiod_rst)
 		wait_for_completion(&ts->firmware_loading_complete);
 
 	goodix_dump_gpio_state(ts, "rmv");
+	
+	sysfs_remove_group(&client->dev.kobj, &goodix_attr_group);
 
 	//now dev-managed
 	//if (ACPI_HANDLE(&ts->client->dev))
@@ -988,14 +1059,14 @@ static int __maybe_unused goodix_suspend(struct device *dev)
 
 	goodix_dump_gpio_state(ts, "PM-S");
 
-	if (do_reset == 1)
+	if (do_reset == 2)
 		wait_for_completion(&ts->firmware_loading_complete);
 
 	/* Free IRQ as IRQ pin is used as output in the suspend sequence */
 	goodix_free_irq(ts);
 
 	/* Output LOW on the INT pin for 5 ms */
-	error = gpiod_direction_output(ts->gpiod_int, 0);
+	error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
 	if (error) {
 		goodix_request_irq(ts);
 		return error;
@@ -1038,7 +1109,7 @@ static int __maybe_unused goodix_resume(struct device *dev)
 	 * Exit sleep mode by outputting HIGH level to INT pin
 	 * for 2ms~5ms.
 	 */
-	error = gpiod_direction_output(ts->gpiod_int, 1);
+	error = gpiod_direction_output(ts->gpiod_int, 1 ^ ts->inverted_gpios);
 	if (error)
 		return error;
 
