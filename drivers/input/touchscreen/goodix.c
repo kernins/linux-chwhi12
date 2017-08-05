@@ -54,7 +54,7 @@ struct goodix_ts_data {
 	struct completion firmware_loading_complete;
 	unsigned long irq_flags;
 	bool suspended;
-	atomic_t open_count;
+	atomic_t inpdev_busy;			//whether input_dev is currently being consumed by some userspace proc(s)
 	struct mutex mutex;				//Protects power management calls and access to suspended flag 
 };
 
@@ -252,27 +252,82 @@ static int goodix_get_cfg_len(u16 id)
 	}
 }
 
-static int goodix_set_power_state(struct goodix_ts_data *ts, bool on)
+
+static int goodix_rpm_enable(struct device *dev)
 {
 	int error;
 
-	if (on) {
-		error = pm_runtime_get_sync(&ts->client->dev);
-	} else {
-		pm_runtime_mark_last_busy(&ts->client->dev);
-		error = pm_runtime_put_autosuspend(&ts->client->dev);
-	}
-
-	if (error < 0) {
-		dev_err(&ts->client->dev, "failed to change power state to %d: %d\n", on, error);
-		if (on)
-			pm_runtime_put_noidle(&ts->client->dev);
-
+	dev_dbg(dev, "Activating RuntimePM\n");
+	
+	//PM state must be set before pm_runtime_enable()
+	error = pm_runtime_set_active(dev);
+	if (error) {
+		dev_err(dev, "RPM: failed to set device active: %d\n", error);
 		return error;
 	}
 
+	pm_runtime_set_autosuspend_delay(dev, GOODIX_AUTOSUSPEND_DELAY_MS);
+	pm_runtime_use_autosuspend(dev);
+
+	pm_runtime_enable(dev);
 	return 0;
 }
+
+static void goodix_rpm_disable(struct device *dev)
+{
+	if (pm_runtime_enabled(dev)) {
+		/* First, resume device if there is a request to do so pending, cancel any other pending PM requests,
+	 	 * and wait for PM ops currently in progress to complete before disabling RPM callbacks
+	 	 */
+		pm_runtime_barrier(dev);
+		pm_runtime_disable(dev);
+
+		pm_runtime_dont_use_autosuspend(dev);
+		pm_runtime_set_suspended(dev);
+
+		/* There is a race between inp_dev close() callback and rpm_disable() being called in remove(),
+		 * usually resulting in goodix_inpdev_close() being called after rpm is already disabled.
+		 * As open()/close() callbacks are invoked for the very first/last consumers only, 
+		 * there could be at most 1 "ref" held due to them. Releasing it now.
+		 * Calling pm_runtime_put_noidle() while dev->power.usage_count==0 is harmless
+		 */
+		pm_runtime_put_noidle(dev);
+	}
+}
+
+static int goodix_rpm_hold_active(struct device *dev)
+{
+	int error;
+
+	if (pm_runtime_enabled(dev)) {
+		/* increments usage counter and calls pm_runtime_resume(), 
+	 	 * returns its result (1 if already active)
+	 	 */
+		error = pm_runtime_get_sync(dev);
+		if (error < 0) {
+			pm_runtime_put_noidle(dev);
+			dev_err(dev, "RPM: pm_runtime_get_sync() failed: %d\n", error);
+			return error;
+		}
+	}
+	return 0;
+}
+
+static int goodix_rpm_release_active(struct device *dev)
+{
+	int error;
+
+	if (pm_runtime_enabled(dev)) {
+		pm_runtime_mark_last_busy(dev);
+		error = pm_runtime_put_autosuspend(dev);
+		if (error < 0) {
+			dev_err(dev, "RPM: pm_runtime_put_autosuspend() failed: %d\n", error);
+			return error;
+		}
+	}
+	return 0;
+}
+
 
 static int goodix_ts_read_input_report(struct goodix_ts_data *ts, u8 *data)
 {
@@ -375,9 +430,9 @@ static void goodix_process_events(struct goodix_ts_data *ts)
  */
 static irqreturn_t goodix_ts_irq_handler(int irq, void *dev_id)
 {
-	struct goodix_ts_data *ts = dev_id;
+	struct goodix_ts_data *ts = (struct goodix_ts_data *)dev_id;
 
-	dev_dbg(&ts->client->dev, "goodix_ts_irq_handler(%u)\n", irq);
+	dev_dbg(&ts->client->dev, "goodix_ts_irq_handler(%u) / users %u\n", irq, ts->input_dev->users);
 	//goodix_dump_gpio_state(ts, "irq-hndl");
 
 	goodix_process_events(ts);
@@ -602,18 +657,19 @@ static ssize_t goodix_config_show(struct device *dev, struct device_attribute *a
 	u8 config[GOODIX_CONFIG_MAX_LENGTH];
 	int error, count = 0, i;
 
-	error = goodix_set_power_state(ts, true);
+	//TODO: add mutex?
+
+	error = goodix_rpm_hold_active(&ts->client->dev);
 	if (error)
 		return error;
+
 	error = goodix_i2c_read(client, GOODIX_REG_CONFIG_DATA, config, ts->cfg_len);
+	goodix_rpm_release_active(&ts->client->dev);
+
 	if (error) {
 		dev_warn(&client->dev, "Error reading config (%d)\n",  error);
-		goodix_set_power_state(ts, false);
 		return error;
-	} else {
-		dev_dbg(&client->dev, "Config read successfully\n");
 	}
-	goodix_set_power_state(ts, false);
 
 	for (i = 0; i < ts->cfg_len; i++)
 		count += scnprintf(buf + count, PAGE_SIZE - count, "%02X", config[i]);
@@ -839,16 +895,17 @@ static int goodix_inpdev_open(struct input_dev *input_dev)
 
 	dev_dbg(&ts->client->dev, "goodix_inpdev_open()\n");
 
-	if (!ts->gpiod_int || !ts->gpiod_rst)
-		return 0;
-
-	if (do_reset == 2)
+	if (do_reset == 2 && ts->gpiod_int && ts->gpiod_rst)
 		wait_for_completion(&ts->firmware_loading_complete);
 
-	error = goodix_set_power_state(ts, true);
+	error = goodix_rpm_hold_active(&ts->client->dev);
 	if (error)
 		return error;
-	atomic_inc(&ts->open_count);
+	
+	/* open/close callbacks are invoked for
+	 * the very first/last consumers only
+	 */
+	atomic_set(&ts->inpdev_busy, 1);
 	return 0;
 }
 
@@ -858,11 +915,8 @@ static void goodix_inpdev_close(struct input_dev *input_dev)
 
 	dev_dbg(&ts->client->dev, "goodix_inpdev_close()\n");
 
-	if (!ts->gpiod_int || !ts->gpiod_rst)
-		return;
-
-	goodix_set_power_state(ts, false);
-	atomic_dec(&ts->open_count);
+	goodix_rpm_release_active(&ts->client->dev);
+	atomic_set(&ts->inpdev_busy, 0);
 }
 
 /**
@@ -946,24 +1000,10 @@ static int goodix_configure_dev(struct goodix_ts_data *ts)
 
 	ts->irq_flags = goodix_irq_flags[ts->int_trigger_type] | IRQF_ONESHOT;
 	dev_info(&ts->client->dev, "IRQ trig type %u, flags %lu\n", ts->int_trigger_type, ts->irq_flags);
-	error = goodix_request_irq(ts);
+	error = goodix_request_irq(ts); //TODO: request only after inpdev open()?
 	if (error) {
 		dev_err(&ts->client->dev, "request IRQ failed: %d\n", error);
 		return error;
-	}
-
-	if (ts->gpiod_int && ts->gpiod_rst) {
-		pm_runtime_set_autosuspend_delay(&ts->client->dev, GOODIX_AUTOSUSPEND_DELAY_MS);
-		pm_runtime_use_autosuspend(&ts->client->dev);
-		error = pm_runtime_set_active(&ts->client->dev);
-		if (error) {
-			dev_err(&ts->client->dev, "failed to set active: %d\n", error);
-			return error;
-		}
-		pm_runtime_enable(&ts->client->dev);
-		/* Must not suspend immediately after device initialization */
-		pm_runtime_mark_last_busy(&ts->client->dev);
-		pm_request_autosuspend(&ts->client->dev);
 	}
 
 	return 0;
@@ -989,18 +1029,27 @@ static void goodix_config_cb(const struct firmware *cfg, void *ctx)
 			goto err_release_cfg;
 	}
 
-	goodix_configure_dev(ts);
+	if (ts->gpiod_int && (goodix_rpm_enable(&ts->client->dev) == 0)) {
+		goodix_rpm_hold_active(&ts->client->dev);
+		goodix_configure_dev(ts);
+		goodix_rpm_release_active(&ts->client->dev);
+	} else {
+		goodix_configure_dev(ts);
+	}
 
 err_release_cfg:
 	release_firmware(cfg);
 	complete_all(&ts->firmware_loading_complete);
 }
 
+//TODO: replace to probe_new(), struct i2c_device_id is unused
 static int goodix_ts_probe(struct i2c_client *client,
 			   const struct i2c_device_id *id)
 {
 	struct goodix_ts_data *ts;
 	int error;
+
+	//TODO: normalize do_reset based on gpio availability to simplify conds across the code
 
 	dev_dbg(&client->dev, "I2C Address: 0x%02x, IRQ: %u / trigType %u\n", 
 		client->addr, 
@@ -1098,7 +1147,15 @@ static int goodix_ts_probe(struct i2c_client *client,
 		}
 	} else {
 		dev_dbg(&client->dev, "Skipping FW load, do_reset=%u.\n", do_reset);
-		error = goodix_configure_dev(ts);
+
+		if (ts->gpiod_int && (goodix_rpm_enable(&ts->client->dev) == 0)) {
+			goodix_rpm_hold_active(&ts->client->dev);
+			error = goodix_configure_dev(ts);
+			goodix_rpm_release_active(&ts->client->dev);
+		} else {
+			error = goodix_configure_dev(ts);
+		}
+
 		if (error)
 			return error;
 	}
@@ -1110,7 +1167,6 @@ static int goodix_ts_probe(struct i2c_client *client,
 		dev_err(&client->dev, "Failed to create sysfs group: %d\n", error);
 		return error;
 	}
-
 	return 0;
 }
 
@@ -1118,14 +1174,17 @@ static int goodix_ts_remove(struct i2c_client *client)
 {
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 
+	dev_dbg(&client->dev, "remove().\n");
+
 	if (do_reset == 2 && ts->gpiod_int && ts->gpiod_rst)
 		wait_for_completion(&ts->firmware_loading_complete);
 
 	goodix_dump_gpio_state(ts, "rmv");
 
-	pm_runtime_disable(&client->dev);
-	pm_runtime_set_suspended(&client->dev);
-	pm_runtime_put_noidle(&client->dev);
+	//TODO: suspend device?
+
+	goodix_rpm_disable(&ts->client->dev);
+	dev_dbg(&client->dev, "RPM disabled.\n");
 	
 	sysfs_remove_group(&client->dev.kobj, &goodix_attr_group);
 
@@ -1140,59 +1199,56 @@ static int __maybe_unused goodix_sleep(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev); //replace to verify_client?
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
-	int error = 0;
+	int error;
 
 	dev_dbg(dev, "goodix_sleep(%u)\n", ts->suspended);
-
-	/* We need gpio pins to suspend/resume */
-	if (!ts->gpiod_int || !ts->gpiod_rst)
-		return 0;
-
 	goodix_dump_gpio_state(ts, "PM-S");
 
-	if (do_reset == 2)
-		wait_for_completion(&ts->firmware_loading_complete);
+	if (ts->gpiod_int) {
+		if (do_reset == 2 && ts->gpiod_rst)
+			wait_for_completion(&ts->firmware_loading_complete);
 
-	mutex_lock(&ts->mutex);
+		mutex_lock(&ts->mutex);
 
-	if (ts->suspended)
-		goto out_error;
+		if (ts->suspended)
+			goto out;
 
-	/* Free IRQ as IRQ pin is used as output in the suspend sequence */
-	goodix_free_irq(ts);
+		/* Free IRQ as IRQ pin is used as output in the suspend sequence */
+		goodix_free_irq(ts);
 
-	/* Output LOW on the INT pin for 5 ms */
-	error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
-	if (error) {
-		goodix_request_irq(ts);
-		goto out_error;
+		/* Output LOW on the INT pin for 5 ms */
+		error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
+		if (error) {
+			dev_err(&ts->client->dev, "sleep(): failed to change gpio_int to out: %d\n", error);
+			goto out_error;
+		}
+
+		usleep_range(5000, 6000);
+		goodix_dump_gpio_state(ts, "PM-S-be4-cmd");
+
+		error = goodix_i2c_write_u8(ts->client, GOODIX_REG_COMMAND, GOODIX_CMD_SCREEN_OFF);
+		if (error) {
+			dev_err(&ts->client->dev, "sleep(): screen off command failed: %d\n", error);
+			gpiod_direction_input(ts->gpiod_int);
+			error = -EAGAIN;
+			goto out_error;
+		}
+
+		/*
+	 	* The datasheet specifies that the interval between sending screen-off
+	 	* command and wake-up should be longer than 58 ms. To avoid waking up
+	 	* sooner, delay 58ms here.
+	 	*/
+		msleep(58);
+	
+		ts->suspended = true;
+out:
+		mutex_unlock(&ts->mutex);
 	}
-
-	usleep_range(5000, 6000);
-
-	goodix_dump_gpio_state(ts, "PM-S-be4-cmd");
-
-	error = goodix_i2c_write_u8(ts->client, GOODIX_REG_COMMAND,
-				    GOODIX_CMD_SCREEN_OFF);
-	if (error) {
-		dev_err(&ts->client->dev, "Screen off command failed\n");
-		gpiod_direction_input(ts->gpiod_int);
-		goodix_request_irq(ts);
-		error = -EAGAIN;
-		goto out_error;
-	}
-
-	/*
-	 * The datasheet specifies that the interval between sending screen-off
-	 * command and wake-up should be longer than 58 ms. To avoid waking up
-	 * sooner, delay 58ms here.
-	 */
-	msleep(58);
-	ts->suspended = true;
-	mutex_unlock(&ts->mutex);
 	return 0;
 
 out_error:
+	goodix_request_irq(ts);
 	mutex_unlock(&ts->mutex);
 	return error;
 }
@@ -1204,43 +1260,44 @@ static int __maybe_unused goodix_wakeup(struct device *dev)
 	int error = 0;
 
 	dev_dbg(dev, "goodix_wakeup(%u)\n", ts->suspended);
-
-	if (!ts->gpiod_int || !ts->gpiod_rst)
-		return 0;
-
 	goodix_dump_gpio_state(ts, "PM-R");
 
-	mutex_lock(&ts->mutex);
+	if (ts->gpiod_int) {
+		mutex_lock(&ts->mutex);
 
-	if (!ts->suspended)
-		goto out_error;
+		if (!ts->suspended)
+			goto out;
 
-	/*
-	 * Exit sleep mode by outputting HIGH level to INT pin
-	 * for 2ms~5ms.
-	 */
-	error = gpiod_direction_output(ts->gpiod_int, 1 ^ ts->inverted_gpios);
-	if (error)
-		goto out_error;
+		//Exit sleep mode by outputting HIGH level to INT pin for 2ms~5ms.
+		error = gpiod_direction_output(ts->gpiod_int, 1 ^ ts->inverted_gpios);
+		if (error) {
+			dev_err(&ts->client->dev, "wakeup(): failed to change gpio_int to out: %d\n", error);
+			goto out;
+		}
 
-	usleep_range(2000, 5000);
+		usleep_range(2000, 5000);
 
-	goodix_dump_gpio_state(ts, "PM-R-INTHI");
+		goodix_dump_gpio_state(ts, "PM-R-INTHI");
 
-	error = goodix_int_sync(ts);
-	if (error)
-		goto out_error;
+		/* Despite datasheet doesn't specify OUT-LOW + msleep(50) sequence for wakeup
+		 * it is actually necessary, at least on my ChuwiHi12 (GT9111)
+		 */
+		error = goodix_int_sync(ts);
+		if (error) {
+			dev_err(&ts->client->dev, "wakeup(): goodix_int_sync() failed: %d\n", error);
+			goto out;
+		}
 
-	error = goodix_request_irq(ts);
-	if (error)
-		goto out_error;
+		error = goodix_request_irq(ts);
+		if (error) {
+			dev_err(&ts->client->dev, "wakeup(): failed to aquire IRQ: %d\n", error);
+			goto out;
+		}
 
-	ts->suspended = false;
-	mutex_unlock(&ts->mutex);
-	return 0;
-
-out_error:
-	mutex_unlock(&ts->mutex);
+		ts->suspended = false;
+out:
+		mutex_unlock(&ts->mutex);
+	}
 	return error;
 }
 
@@ -1249,12 +1306,9 @@ static int __maybe_unused goodix_resume(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev); //replace to verify_client?
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 
-	dev_dbg(dev, "goodix_resume(%d)\n", atomic_read(&ts->open_count));
+	dev_dbg(dev, "goodix_resume(%d)\n", atomic_read(&ts->inpdev_busy));
 
-	if (!atomic_read(&ts->open_count))
-		return 0;
-
-	return goodix_wakeup(dev);
+	return atomic_read(&ts->inpdev_busy)? goodix_wakeup(dev) : 0;
 }
 
 static const struct dev_pm_ops goodix_pm_ops = {
