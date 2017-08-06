@@ -173,8 +173,7 @@ static void goodix_dump_gpio_state(struct goodix_ts_data *ts, const char *realm)
  * @buf: raw write data buffer.
  * @len: length of the buffer to write
  */
-static int goodix_i2c_read(struct i2c_client *client,
-			   u16 reg, u8 *buf, int len)
+static int goodix_i2c_read(struct i2c_client *client, u16 reg, u8 *buf, int len)
 {
 	struct i2c_msg msgs[2];
 	u16 wbuf = cpu_to_be16(reg);
@@ -308,6 +307,8 @@ static int goodix_rpm_hold_active(struct device *dev)
 			pm_runtime_put_noidle(dev);
 			dev_err(dev, "RPM: pm_runtime_get_sync() failed: %d\n", error);
 			return error;
+		} else {
+			dev_dbg(dev, "RPM: holding device active: refCnt %d", atomic_read(&dev->power.usage_count));
 		}
 	}
 	return 0;
@@ -323,6 +324,8 @@ static int goodix_rpm_release_active(struct device *dev)
 		if (error < 0) {
 			dev_err(dev, "RPM: pm_runtime_put_autosuspend() failed: %d\n", error);
 			return error;
+		} else {
+			dev_dbg(dev, "RPM: released device: refCnt %d", atomic_read(&dev->power.usage_count));
 		}
 	}
 	return 0;
@@ -457,6 +460,28 @@ static int goodix_request_irq(struct goodix_ts_data *ts)
 	return devm_request_threaded_irq(&ts->client->dev, ts->client->irq,
 					 NULL, goodix_ts_irq_handler,
 					 ts->irq_flags, ts->client->name, ts);
+}
+
+static int goodix_read_cfg(struct goodix_ts_data *ts, u8 *buf)
+{
+	int error;
+
+#if defined(DEBUG)
+	char hexdump[GOODIX_CONFIG_MAX_LENGTH * 2 + 1];
+	int i;
+#endif
+
+	error = goodix_i2c_read(ts->client, GOODIX_REG_CONFIG_DATA, buf, ts->cfg_len);
+	if (error) {
+		dev_warn(&ts->client->dev, "read_config() failed: %d\n",  error);
+	} else {
+#if defined(DEBUG)
+		for(i=0; i<ts->cfg_len; i++) scnprintf(hexdump + i*2, (GOODIX_CONFIG_MAX_LENGTH - i)*2 + 1, "%02X", buf[i]);
+		dev_dbg(&ts->client->dev, "Read CFG data from IC: %s\n", hexdump);
+#endif
+	}
+
+	return error;
 }
 
 /**
@@ -663,11 +688,10 @@ static ssize_t goodix_config_show(struct device *dev, struct device_attribute *a
 	if (error)
 		return error;
 
-	error = goodix_i2c_read(client, GOODIX_REG_CONFIG_DATA, config, ts->cfg_len);
+	error = goodix_read_cfg(ts, config);
 	goodix_rpm_release_active(&ts->client->dev);
 
 	if (error) {
-		dev_warn(&client->dev, "Error reading config (%d)\n",  error);
 		return error;
 	}
 
@@ -773,118 +797,33 @@ static int goodix_get_gpio_config(struct goodix_ts_data *ts)
 }
 
 /**
- * goodix_read_config - Read the embedded configuration of the panel
- *
- * @ts: our goodix_ts_data pointer
- *
- * Must be called during probe
- */
-static void goodix_read_config(struct goodix_ts_data *ts)
-{
-	u8 config[GOODIX_CONFIG_MAX_LENGTH];
-	int error;
-
-#if defined(DEBUG)
-	char hexdump[GOODIX_CONFIG_MAX_LENGTH * 2 + 1];
-	int i;
-#endif
-
-	error = goodix_i2c_read(ts->client, GOODIX_REG_CONFIG_DATA,
-				config, ts->cfg_len);
-	if (error) {
-		dev_warn(&ts->client->dev,
-			 "Error reading config (%d), using defaults\n",
-			 error);
-		ts->abs_x_max = GOODIX_MAX_WIDTH;
-		ts->abs_y_max = GOODIX_MAX_HEIGHT;
-		if (ts->swapped_x_y)
-			swap(ts->abs_x_max, ts->abs_y_max);
-		ts->int_trigger_type = GOODIX_INT_TRIGGER;
-		ts->max_touch_num = GOODIX_MAX_CONTACTS;
-		return;
-	}
-
-#if defined(DEBUG)
-	for(i=0; i<ts->cfg_len; i++) scnprintf(hexdump + i*2, (GOODIX_CONFIG_MAX_LENGTH - i)*2 + 1, "%02X", config[i]);
-	dev_dbg(&ts->client->dev, "CFG data: %s\n", hexdump);
-#endif
-
-	ts->abs_x_max = get_unaligned_le16(&config[RESOLUTION_LOC]);
-	ts->abs_y_max = get_unaligned_le16(&config[RESOLUTION_LOC + 2]);
-	if (ts->swapped_x_y)
-		swap(ts->abs_x_max, ts->abs_y_max);
-	ts->int_trigger_type = config[TRIGGER_LOC] & 0x03;
-	ts->max_touch_num = config[MAX_CONTACTS_LOC] & 0x0f;
-	if (!ts->abs_x_max || !ts->abs_y_max || !ts->max_touch_num) {
-		dev_err(&ts->client->dev,
-			"Invalid config, using defaults\n");
-		ts->abs_x_max = GOODIX_MAX_WIDTH;
-		ts->abs_y_max = GOODIX_MAX_HEIGHT;
-		if (ts->swapped_x_y)
-			swap(ts->abs_x_max, ts->abs_y_max);
-		ts->max_touch_num = GOODIX_MAX_CONTACTS;
-	}
-
-	if (dmi_check_system(rotated_screen)) {
-		ts->inverted_x = true;
-		ts->inverted_y = true;
-		dev_dbg(&ts->client->dev,
-			 "Applying '180 degrees rotated screen' quirk\n");
-	}
-}
-
-/**
  * goodix_read_version - Read goodix touchscreen version
  *
  * @ts: our goodix_ts_data pointer
  */
 static int goodix_read_version(struct goodix_ts_data *ts)
 {
-	int error;
+	int error, attempt = 0;
 	u8 buf[6];
 	char id_str[5];
 
-	error = goodix_i2c_read(ts->client, GOODIX_REG_ID, buf, sizeof(buf));
-	if (error) {
-		dev_err(&ts->client->dev, "read version failed: %d\n", error);
-		return error;
+	while (++attempt <= 3) {
+		error = goodix_i2c_read(ts->client, GOODIX_REG_ID, buf, sizeof(buf));
+		if (!error) break;
+		
+		dev_err(&ts->client->dev, "read_version() attempt#%u failed: %d\n", attempt, error);
+		usleep_range(10000, 30000);
 	}
 
-	memcpy(id_str, buf, 4);
-	id_str[4] = 0;
-	if (kstrtou16(id_str, 10, &ts->id))
-		ts->id = 0x1001;
+	if (!error) {
+		memcpy(id_str, buf, 4);
+		id_str[4] = 0;
 
-	ts->version = get_unaligned_le16(&buf[4]);
+		if (kstrtou16(id_str, 10, &ts->id)) ts->id = 0x1001;
+		ts->version = get_unaligned_le16(&buf[4]);
 
-	dev_info(&ts->client->dev, "ID %d, version: %04x\n", ts->id,
-		 ts->version);
-
-	return 0;
-}
-
-/**
- * goodix_i2c_test - I2C test function to check if the device answers.
- *
- * @client: the i2c client
- */
-static int goodix_i2c_test(struct i2c_client *client)
-{
-	int retry = 0;
-	int error;
-	u8 test;
-
-	while (retry++ < 2) {
-		error = goodix_i2c_read(client, GOODIX_REG_CONFIG_DATA,
-					&test, 1);
-		if (!error)
-			return 0;
-
-		dev_err(&client->dev, "i2c test failed attempt %d: %d\n",
-			retry, error);
-		msleep(20);
+		dev_info(&ts->client->dev, "ID %d, version: %04x\n", ts->id, ts->version);
 	}
-
 	return error;
 }
 
@@ -983,16 +922,36 @@ static int goodix_request_input_dev(struct goodix_ts_data *ts)
  */
 static int goodix_configure_dev(struct goodix_ts_data *ts)
 {
+	u8 config[GOODIX_CONFIG_MAX_LENGTH];
 	int error;
 
-	ts->swapped_x_y = device_property_read_bool(&ts->client->dev,
-						    "touchscreen-swapped-x-y");
-	ts->inverted_x = device_property_read_bool(&ts->client->dev,
-						   "touchscreen-inverted-x");
-	ts->inverted_y = device_property_read_bool(&ts->client->dev,
-						   "touchscreen-inverted-y");
+	error = goodix_read_cfg(ts, config);
+	if (!error) {
+		ts->abs_x_max = get_unaligned_le16(&config[RESOLUTION_LOC]);
+		ts->abs_y_max = get_unaligned_le16(&config[RESOLUTION_LOC + 2]);
+		ts->int_trigger_type = config[TRIGGER_LOC] & 0x03;
+		ts->max_touch_num = config[MAX_CONTACTS_LOC] & 0x0f;
+	}
+	
+	if (error || !ts->abs_x_max || !ts->abs_y_max || !ts->max_touch_num) {
+		dev_err(&ts->client->dev, "Read config failed (%d) or invalid data received, using defaults\n", error);
+		ts->abs_x_max = GOODIX_MAX_WIDTH;
+		ts->abs_y_max = GOODIX_MAX_HEIGHT;
+		ts->int_trigger_type = GOODIX_INT_TRIGGER;
+		ts->max_touch_num = GOODIX_MAX_CONTACTS;
+	}
 
-	goodix_read_config(ts);
+	ts->swapped_x_y = device_property_read_bool(&ts->client->dev, "touchscreen-swapped-x-y");
+	if (ts->swapped_x_y) swap(ts->abs_x_max, ts->abs_y_max);
+
+	if (dmi_check_system(rotated_screen)) {
+		dev_dbg(&ts->client->dev, "Applying '180 degrees rotated screen' quirk\n");
+		ts->inverted_x = true;
+		ts->inverted_y = true;
+	} else {
+		ts->inverted_x = device_property_read_bool(&ts->client->dev, "touchscreen-inverted-x");
+		ts->inverted_y = device_property_read_bool(&ts->client->dev, "touchscreen-inverted-y");
+	}
 
 	error = goodix_request_input_dev(ts);
 	if (error)
@@ -1075,31 +1034,6 @@ static int goodix_ts_probe(struct i2c_client *client,
 	if (error)
 		return error;
 
-	if (ts->gpiod_int) {
-		dev_dbg(&client->dev, "ClientIRQ: %u, gpiod_to_irq()=%u\n", client->irq, gpiod_to_irq(ts->gpiod_int));
-#if defined(DEBUG)
-		if (gpiod_export(ts->gpiod_int, false) < 0) {
-			dev_err(&client->dev, "Failed to export GPIO-INT!.\n");
-		} else {
-			dev_dbg(&client->dev, "Exported GPIO-INT to sysfs\n");
-		}
-#endif
-	} else {
-		dev_err(&client->dev, "GPIO-INT not available!.\n");
-	}
-
-	if (ts->gpiod_rst) {
-#if defined(DEBUG)
-		if (gpiod_export(ts->gpiod_rst, false) < 0) {
-			dev_err(&client->dev, "Failed to export GPIO-RST!.\n");
-		} else {
-			dev_dbg(&client->dev, "Exported GPIO-RST to sysfs\n");
-		}
-#endif
-	} else {
-		dev_err(&client->dev, "GPIO-RST not available!.\n");
-	}
-
 	if (do_reset >= 1) {
 		if (ts->gpiod_int && ts->gpiod_rst) {
 			/* reset the controller */
@@ -1114,12 +1048,6 @@ static int goodix_ts_probe(struct i2c_client *client,
 		}
 	} else {
 		dev_dbg(&client->dev, "Skipping controller hard-reset due to do_reset=%u.\n", do_reset);
-	}
-
-	error = goodix_i2c_test(client);
-	if (error) {
-		dev_err(&client->dev, "I2C communication failure: %d\n", error);
-		return error;
 	}
 
 	error = goodix_read_version(ts);
