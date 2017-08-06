@@ -51,7 +51,6 @@ struct goodix_ts_data {
 	u16 id;
 	u16 version;
 	const char *cfg_name;
-	struct completion firmware_loading_complete;
 	unsigned long irq_flags;
 	bool suspended;
 	atomic_t inpdev_busy;			//whether input_dev is currently being consumed by some userspace proc(s)
@@ -485,20 +484,18 @@ static int goodix_read_cfg(struct goodix_ts_data *ts, u8 *buf)
 }
 
 /**
- * goodix_check_cfg - Checks if config fw is valid
+ * goodix_send_cfg - Write fw config to device
  *
  * @ts: goodix_ts_data pointer
- * @cfg: firmware config data
+ * @cfg: config firmware to write to device
  */
-static int goodix_check_cfg(struct goodix_ts_data *ts,
-			    const struct firmware *cfg)
+static int goodix_send_cfg(struct goodix_ts_data *ts, const struct firmware *cfg)
 {
-	int i, raw_cfg_len;
 	u8 check_sum = 0;
+	int error, i, raw_cfg_len;
 
-	if (cfg->size > GOODIX_CONFIG_MAX_LENGTH) {
-		dev_err(&ts->client->dev,
-			"The length of the config fw is not correct");
+	if (cfg->size != ts->cfg_len) {
+		dev_err(&ts->client->dev, "Invalid firmware size: %lu, expected %u", cfg->size, ts->cfg_len);
 		return -EINVAL;
 	}
 
@@ -506,48 +503,26 @@ static int goodix_check_cfg(struct goodix_ts_data *ts,
 	for (i = 0; i < raw_cfg_len; i++)
 		check_sum += cfg->data[i];
 	check_sum = (~check_sum) + 1;
+
 	if (check_sum != cfg->data[raw_cfg_len]) {
-		dev_err(&ts->client->dev,
-			"The checksum of the config fw is not correct");
+		dev_err(&ts->client->dev, "Invalid firmware checksum: %02X, expected %02X", cfg->data[raw_cfg_len], check_sum);
 		return -EINVAL;
 	}
 
 	if (cfg->data[raw_cfg_len + 1] != 1) {
-		dev_err(&ts->client->dev,
-			"Config fw must have Config_Fresh register set");
+		dev_err(&ts->client->dev, "Config fw must have Config_Fresh register set");
 		return -EINVAL;
 	}
 
-	return 0;
-}
-
-/**
- * goodix_send_cfg - Write fw config to device
- *
- * @ts: goodix_ts_data pointer
- * @cfg: config firmware to write to device
- */
-static int goodix_send_cfg(struct goodix_ts_data *ts,
-			   const struct firmware *cfg)
-{
-	int error;
-
-	error = goodix_check_cfg(ts, cfg);
-	if (error)
-		return error;
-
-	error = goodix_i2c_write(ts->client, GOODIX_REG_CONFIG_DATA, cfg->data,
-				 cfg->size);
+	error = goodix_i2c_write(ts->client, GOODIX_REG_CONFIG_DATA, cfg->data, cfg->size);
 	if (error) {
-		dev_err(&ts->client->dev, "Failed to write config data: %d",
-			error);
+		dev_err(&ts->client->dev, "Failed to send config data to IC: %d", error);
 		return error;
 	}
 	dev_dbg(&ts->client->dev, "Config sent successfully.");
 
 	/* Let the firmware reconfigure itself, so sleep for 10ms */
 	usleep_range(10000, 11000);
-
 	return 0;
 }
 
@@ -804,9 +779,6 @@ static int goodix_inpdev_open(struct input_dev *input_dev)
 
 	dev_dbg(&ts->client->dev, "goodix_inpdev_open()\n");
 
-	if (do_reset == 2 && ts->gpiod_int && ts->gpiod_rst)
-		wait_for_completion(&ts->firmware_loading_complete);
-
 	error = goodix_rpm_hold_active(&ts->client->dev);
 	if (error)
 		return error;
@@ -938,47 +910,11 @@ static int goodix_configure_dev(struct goodix_ts_data *ts)
 	return 0;
 }
 
-/**
- * goodix_config_cb - Callback to finish device init
- *
- * @ts: our goodix_ts_data pointer
- *
- * request_firmware_wait callback that finishes
- * initialization of the device.
- */
-static void goodix_config_cb(const struct firmware *cfg, void *ctx)
-{
-	struct goodix_ts_data *ts = (struct goodix_ts_data *)ctx;
-	int error;
-
-	if (cfg) {
-		/* send device configuration to the firmware */
-		error = goodix_send_cfg(ts, cfg);
-		if (error)
-			goto err_release_cfg;
-	}
-
-	if (ts->gpiod_int && (goodix_rpm_enable(&ts->client->dev) == 0)) {
-		goodix_rpm_hold_active(&ts->client->dev);
-		goodix_configure_dev(ts);
-		goodix_rpm_release_active(&ts->client->dev);
-	} else {
-		goodix_configure_dev(ts);
-	}
-
-err_release_cfg:
-	release_firmware(cfg);
-	complete_all(&ts->firmware_loading_complete);
-}
-
-//TODO: replace to probe_new(), struct i2c_device_id is unused
-static int goodix_ts_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id)
+static int goodix_ts_probe(struct i2c_client *client)
 {
 	struct goodix_ts_data *ts;
+	const struct firmware *firmware;
 	int error;
-
-	//TODO: normalize do_reset based on gpio availability to simplify conds across the code
 
 	dev_dbg(&client->dev, "I2C Address: 0x%02x, IRQ: %u / trigType %u\n", 
 		client->addr, 
@@ -997,7 +933,6 @@ static int goodix_ts_probe(struct i2c_client *client,
 
 	ts->client = client;
 	i2c_set_clientdata(client, ts);
-	init_completion(&ts->firmware_loading_complete);
 	mutex_init(&ts->mutex);
 
 	error = goodix_get_gpio_config(ts);
@@ -1034,30 +969,31 @@ static int goodix_ts_probe(struct i2c_client *client,
 			return -ENOMEM;
 
 		dev_info(&client->dev, "Requesting firmware: %s, len %d\n", ts->cfg_name, ts->cfg_len);
-		error = request_firmware_nowait(THIS_MODULE, true, ts->cfg_name,
-						&client->dev, GFP_KERNEL, ts,
-						goodix_config_cb);
+		error = request_firmware_direct(&firmware, ts->cfg_name, &client->dev);
 		if (error) {
-			dev_err(&client->dev,
-				"Failed to invoke firmware loader: %d\n",
-				error);
+			dev_err(&client->dev, "Failed to invoke firmware loader: %d\n", error);
 			return error;
 		}
-	} else {
-		dev_dbg(&client->dev, "Skipping FW load, do_reset=%u.\n", do_reset);
 
-		if (ts->gpiod_int && (goodix_rpm_enable(&ts->client->dev) == 0)) {
-			goodix_rpm_hold_active(&ts->client->dev);
-			error = goodix_configure_dev(ts);
-			goodix_rpm_release_active(&ts->client->dev);
-		} else {
-			error = goodix_configure_dev(ts);
-		}
-
+		error = goodix_send_cfg(ts, firmware);
+		release_firmware(firmware);
 		if (error)
 			return error;
+	} else {
+		dev_dbg(&client->dev, "Skipping FW load, do_reset=%u.\n", do_reset);
 	}
 
+	if (ts->gpiod_int && (goodix_rpm_enable(&ts->client->dev) == 0)) {
+		goodix_rpm_hold_active(&ts->client->dev);
+		error = goodix_configure_dev(ts);
+		goodix_rpm_release_active(&ts->client->dev);
+	} else {
+		error = goodix_configure_dev(ts);
+	}
+
+	if (error)
+		return error;
+	
 	goodix_dump_gpio_state(ts, "prb done");
 
 	error = sysfs_create_group(&client->dev.kobj, &goodix_attr_group);
@@ -1074,9 +1010,6 @@ static int goodix_ts_remove(struct i2c_client *client)
 
 	dev_dbg(&client->dev, "remove().\n");
 
-	if (do_reset == 2 && ts->gpiod_int && ts->gpiod_rst)
-		wait_for_completion(&ts->firmware_loading_complete);
-
 	goodix_dump_gpio_state(ts, "rmv");
 
 	//TODO: suspend device?
@@ -1085,10 +1018,6 @@ static int goodix_ts_remove(struct i2c_client *client)
 	dev_dbg(&client->dev, "RPM disabled.\n");
 	
 	sysfs_remove_group(&client->dev.kobj, &goodix_attr_group);
-
-	//now dev-managed
-	//if (ACPI_HANDLE(&ts->client->dev))
-	//	acpi_dev_remove_driver_gpios(ACPI_COMPANION(&ts->client->dev));
 
 	return 0;
 }
@@ -1103,9 +1032,6 @@ static int __maybe_unused goodix_sleep(struct device *dev)
 	goodix_dump_gpio_state(ts, "PM-S");
 
 	if (ts->gpiod_int) {
-		if (do_reset == 2 && ts->gpiod_rst)
-			wait_for_completion(&ts->firmware_loading_complete);
-
 		mutex_lock(&ts->mutex);
 
 		if (ts->suspended)
@@ -1244,7 +1170,7 @@ MODULE_DEVICE_TABLE(of, goodix_of_match);
 #endif
 
 static struct i2c_driver goodix_ts_driver = {
-	.probe = goodix_ts_probe,
+	.probe_new = goodix_ts_probe,
 	.remove = goodix_ts_remove,
 	.id_table = goodix_ts_id,
 	.driver = {
