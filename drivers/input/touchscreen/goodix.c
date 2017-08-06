@@ -96,6 +96,10 @@ static ushort do_reset = 1;
 module_param(do_reset, ushort, S_IRUGO);
 MODULE_PARM_DESC(do_reset, "1 = do hard chip reset only (default), 2 = #1 + load FW afterwards, 0 - no reset");
 
+static uint btn_code = 0;
+module_param(btn_code, uint, S_IRUGO);
+MODULE_PARM_DESC(btn_code, "Code to report for capacitive button touches (as declared in input-event-codes.h). Default is 0 (disabled), KEY_LEFTMETA (WinKey) is 125");
+
 /*
  * Those tablets have their coordinates origin at the bottom right
  * of the tablet, as if rotated 180 degrees
@@ -407,18 +411,19 @@ static void goodix_process_events(struct goodix_ts_data *ts)
 	if (touch_num < 0)
 		return;
 
-	/*
-	 * Bit 4 of the first byte reports the status of the capacitive Windows/Home button.
-	 *
-	 * Note: According to the datasheet, it could be that it actually reports OR-ed state of all buttons,
-	 * and individual button states are at GOODIX_READ_COOR_ADDR + (1 + GOODIX_CONTACT_SIZE * GOODIX_MAX_CONTACTS), 
-	 * i.e. right after last touch-point's data block. In the datasheet that reg is named 'keyvalue'
-	 */
-	input_report_key(ts->input_dev, KEY_LEFTMETA, !!(point_data[0] & BIT(4)));
+	if (btn_code) {
+		/*
+		 * Bit 4 of the first byte reports the status of the capacitive Windows/Home button.
+		 *
+		 * Note: According to the datasheet, it could be that it actually reports OR-ed state of all buttons,
+		 * and individual button states are at GOODIX_READ_COOR_ADDR + (1 + GOODIX_CONTACT_SIZE * GOODIX_MAX_CONTACTS), 
+		 * i.e. right after last touch-point's data block. In the datasheet that reg is named 'keyvalue'
+		 */
+		input_report_key(ts->input_dev, btn_code, !!(point_data[0] & BIT(4)));
+	}
 
 	for (i = 0; i < touch_num; i++)
-		goodix_ts_report_touch(ts,
-				&point_data[1 + GOODIX_CONTACT_SIZE * i]);
+		goodix_ts_report_touch(ts, &point_data[1 + GOODIX_CONTACT_SIZE * i]);
 
 	input_mt_sync_frame(ts->input_dev);
 	input_sync(ts->input_dev);
@@ -817,15 +822,12 @@ static int goodix_request_input_dev(struct goodix_ts_data *ts)
 		return -ENOMEM;
 	}
 
-	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_X,
-			     0, ts->abs_x_max, 0, 0);
-	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y,
-			     0, ts->abs_y_max, 0, 0);
+	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_X, 0, ts->abs_x_max, 0, 0);
+	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y, 0, ts->abs_y_max, 0, 0);
 	input_set_abs_params(ts->input_dev, ABS_MT_WIDTH_MAJOR, 0, 255, 0, 0);
 	input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
 
-	input_mt_init_slots(ts->input_dev, ts->max_touch_num,
-			    INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
+	input_mt_init_slots(ts->input_dev, ts->max_touch_num, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
 
 	ts->input_dev->name = "Goodix Capacitive TouchScreen";
 	ts->input_dev->phys = "input/ts";
@@ -839,13 +841,15 @@ static int goodix_request_input_dev(struct goodix_ts_data *ts)
 	ts->input_dev->close = goodix_inpdev_close;
 	input_set_drvdata(ts->input_dev, ts);
 
-	/* Capacitive Windows/Home button on some devices */
-	input_set_capability(ts->input_dev, EV_KEY, KEY_LEFTMETA);
+	if (btn_code) {
+		/* Capacitive Windows/Home button on some devices */
+		input_set_capability(ts->input_dev, EV_KEY, btn_code);
+		dev_dbg(&ts->client->dev, "Will report capacitive button touches as %u", btn_code);
+	}
 
 	error = input_register_device(ts->input_dev);
 	if (error) {
-		dev_err(&ts->client->dev,
-			"Failed to register input device: %d", error);
+		dev_err(&ts->client->dev, "Failed to register input device: %d", error);
 		return error;
 	}
 
@@ -915,6 +919,15 @@ static int goodix_ts_probe(struct i2c_client *client)
 	struct goodix_ts_data *ts;
 	const struct firmware *firmware;
 	int error;
+
+	if (do_reset > 2) {
+		dev_err(&client->dev, "do_reset parameter out of range: %u\n", do_reset);
+		return -EINVAL;
+	}
+	if (btn_code > KEY_MAX) {
+		dev_err(&client->dev, "btn_code parameter out of range: %u\n", btn_code);
+		return -EINVAL;
+	}
 
 	dev_dbg(&client->dev, "I2C Address: 0x%02x, IRQ: %u / trigType %u\n", 
 		client->addr, 
