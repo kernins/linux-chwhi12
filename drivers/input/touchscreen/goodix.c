@@ -599,77 +599,47 @@ static int goodix_reset(struct goodix_ts_data *ts)
 
 	goodix_dump_gpio_state(ts, "be4 HR");
 
-	/* begin select I2C slave addr */
 	//initial reset state as seen by GT IC: RST=0 (reset), INT=0
 	error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
-	//error = gpiod_direction_output_raw(ts->gpiod_int, 0); //ignoring AL flag
 	if (error)
 		return error;
 	error = gpiod_direction_output(ts->gpiod_rst, 0 ^ ts->inverted_gpios);
-	//error = gpiod_direction_output_raw(ts->gpiod_rst, 1); //inverted RST
 	if (error)
 		return error;
-
-	//this seem to be necessary only at poweron-time, to allow voltage to settle
 	usleep_range(11000, 20000); //>10ms
+
 	goodix_dump_gpio_state(ts, "HR-start");
 
 	//selecting I2C addr: HIGH: 0x28/0x29, LOW: 0xBA/0xBB
 	//state as seen by GT IC: RST=0 (reset), INT=1 for 0x14, 0 otherwise
 	gpiod_set_value(ts->gpiod_int, (ts->client->addr==0x14) ^ ts->inverted_gpios);
-	//error = gpiod_direction_output(ts->gpiod_int, (ts->client->addr==0x14) ^ ts->inverted_gpios);
-	//error = gpiod_direction_output_raw(ts->gpiod_int, 1);
-	//if (error)
-	//	return error;
-
 	usleep_range(150, 2000);		/* T3: > 100us */
 
-	//releasing RST
+	//releasing RST#
 	//state as seen by GT IC: RST=1 (IC active), INT=1 for 0x14, 0 otherwise
 	gpiod_set_value(ts->gpiod_rst, 1 ^ ts->inverted_gpios);
-	//error = gpiod_direction_output(ts->gpiod_rst, 1 ^ ts->inverted_gpios);
-	//error = gpiod_direction_output_raw(ts->gpiod_rst, 0); //inverted RST
-	//if (error)
-	//	return error;
-
 	usleep_range(6000, 10000);		/* T4: > 5ms */
+
 	goodix_dump_gpio_state(ts, "int1-rst1");
 
-	/*	Further sequence is unclear. 
-	 *	Some datasheets (e.g. GT968) specify switching straight to input at this point, letting GT IC to drive INT line,
-	 *	while others (e.g. GT911) show additional OUT-LOW - msleep(50) sequence for INT-pin before switching it to input.
+	/* Further sequence is unclear. 
+	 * Some datasheets (e.g. GT968) specify switching straight to input at this point, letting GT IC to drive INT line,
+	 * while others (e.g. GT911) show additional OUT-LOW - msleep(50) sequence for INT-pin before switching it to input.
+	 * Hi12's GT9111 seem to require the latter approach
 	 */
+
 	//finishing addr sel
 	//state as seen by GT IC: RST=1 (IC active), INT=0
-	gpiod_set_value(ts->gpiod_int, 0 ^ ts->inverted_gpios);
-	//error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
-	//this seems to actually be necessary with corrected reset sequence, otherwise cfg_reg reads all-0
-	//error = gpiod_direction_output_raw(ts->gpiod_int, 0);
-	//if (error)
-	//	return error;
-	msleep(50);
-
-	goodix_dump_gpio_state(ts, "be4-inp");
-
-	error = gpiod_direction_input(ts->gpiod_int);
+	//50ms delay, INT changed to input
+	error = goodix_int_sync(ts);
 	if (error)
 		return error;
 
-	/* end select I2C slave addr */
 	//not really necessary (however may save a tiny-tiny-tiny-bit of pwr),
 	//but doesn't hurt either - there must be pull-up on GT RST# pin anyway
 	error = gpiod_direction_input(ts->gpiod_rst);
 	if (error)
 		return error;
-	//why is it necessary to switch RST back to input? w/o this I2C comm always fails
-	//may be there is signal inversion on rst line, e.g. a mosfet in between soc & gdix?
-
-	/*error = goodix_int_sync(ts);
-	if (error)
-		return error;*/
-
-	//msleep(5);
-	//goodix_dump_gpio_state(ts, "rst-all-inp");
 
 	return 0;
 }
