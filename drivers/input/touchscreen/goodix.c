@@ -125,10 +125,11 @@ static const struct dmi_system_id rotated_screen[] = {
 };
 
 /*
- * Some platforms specify the gpio pins for interrupt and reset properly
- * in ACPI, but do not describe them using _DSD properties.
+ * Those machines have ActiveLow INT and somehow inverted RST 
+ * probably GT RST# is being driven by N-MOSFET, which in turn is driven by gpio
+ * Chiwu Hi12 in particular is also missing _DSD mapping for those gpios
  */
-static const struct dmi_system_id goodix_gpios_int_first_support[] = {
+static const struct dmi_system_id goodix_inverted_gpios[] = {
 #if defined(CONFIG_DMI) && defined(CONFIG_X86)
 	{
 		.ident = "Chuwi Hi12",
@@ -645,12 +646,12 @@ static const struct attribute_group goodix_attr_group = {
 };
 
 
-static const struct acpi_gpio_params goodix_first_gpio = { 0, 0, true }; 	//declared as ActiveLow in ACPI GpioInt(), setting it false here has no effect
-static const struct acpi_gpio_params goodix_second_gpio = { 1, 0, false }; //this one has HW inversion (or GT9111 has active-hight RST), so physical-high means reset-active
+static const struct acpi_gpio_params goodix_invgpio_int = { 0, 0, true }; 	//declared as ActiveLow in ACPI GpioInt(), setting it false here has no effect
+static const struct acpi_gpio_params goodix_invgpio_rst = { 1, 0, false }; //this one has HW inversion (or GT9111 has active-high RST - unlikely), so physical-high means reset-active
 
-static const struct acpi_gpio_mapping goodix_gpios_int_first[] = {
-	{ GOODIX_GPIO_INT_NAME "-gpios", &goodix_first_gpio, 1 },
-	{ GOODIX_GPIO_RST_NAME "-gpios", &goodix_second_gpio, 1 },
+static const struct acpi_gpio_mapping goodix_inverted_gpios_map[] = {
+	{ GOODIX_GPIO_INT_NAME "-gpios", &goodix_invgpio_int, 1 },
+	{ GOODIX_GPIO_RST_NAME "-gpios", &goodix_invgpio_rst, 1 },
 	{ },
 };
 
@@ -669,8 +670,8 @@ static int goodix_get_gpio_config(struct goodix_ts_data *ts)
 		return -EINVAL;
 	dev = &ts->client->dev;
 
-	if (dmi_check_system(goodix_gpios_int_first_support) && ACPI_HANDLE(dev)) {
-		error = devm_acpi_dev_add_driver_gpios(dev, goodix_gpios_int_first);
+	if (dmi_check_system(goodix_inverted_gpios) && ACPI_HANDLE(dev)) {
+		error = devm_acpi_dev_add_driver_gpios(dev, goodix_inverted_gpios_map);
 		if (error)
 			return error;
 		ts->inverted_gpios = true;
