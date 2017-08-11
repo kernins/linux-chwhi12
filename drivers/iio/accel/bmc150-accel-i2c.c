@@ -64,6 +64,7 @@ static const struct acpi_device_id bmc150_accel_acpi_match[] = {
 	{"BMA250E",	bma250e},
 	{"BMA222E",	bma222e},
 	{"BMA0280",	bma280},
+	{"BOSC0200",	bma255}, //Chuwi Hi12
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, bmc150_accel_acpi_match);
@@ -75,6 +76,7 @@ static const struct i2c_device_id bmc150_accel_id[] = {
 	{"bma250e",		bma250e},
 	{"bma222e",		bma222e},
 	{"bma280",		bma280},
+	{"BOSC0200:00",	bma255}, //Chuwi Hi12
 	{}
 };
 
