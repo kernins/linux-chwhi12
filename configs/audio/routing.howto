@@ -1,0 +1,153 @@
+soc-dapm.h
+-------------------------------
+/*
+ * DAPM audio route definition.
+ *
+ * Defines an audio route originating at source via control and finishing
+ * at sink.
+ */
+struct snd_soc_dapm_route {
+	const char *sink;
+	const char *control;
+	const char *source;
+	***snip***
+};
+
+
+bytcht_es8316.c
+-------------------------------
+static const struct snd_soc_dapm_route byt_cht_es8316_audio_map[] = {
+	{"MIC1", NULL, "Microphone 1"},
+	{"MIC2", NULL, "Microphone 2"},
+
+	{"Headphone", NULL, "HPOL"},
+	{"Headphone", NULL, "HPOR"},
+
+	{"Playback", NULL, "ssp2 Tx"},
+	{"ssp2 Tx", NULL, "codec_out0"},
+	{"ssp2 Tx", NULL, "codec_out1"},
+	{"codec_in0", NULL, "ssp2 Rx" },
+	{"codec_in1", NULL, "ssp2 Rx" },
+	{"ssp2 Rx", NULL, "Capture"},
+};
+
+
+sst-atom-controls.c
+-------------------------------
+static const struct snd_soc_dapm_route intercon[] = {
+	{"media0_in", NULL, "Compress Playback"},
+	
+	{"media1_in", NULL, "Headset Playback"},	// Play: Headset Playback -> media1_in
+	
+	{"media2_in", NULL, "pcm0_out"},
+	{"media3_in", NULL, "Deepbuffer Playback"},
+
+	{"media0_out mix 0", "media0_in Switch", "media0_in"},
+	
+	{"media0_out mix 0", "media1_in Switch", "media1_in"}, //Play: media1_in -(via media1_in Switch)-> media0_out mix0
+	
+	{"media0_out mix 0", "media2_in Switch", "media2_in"},
+	{"media0_out mix 0", "media3_in Switch", "media3_in"},
+	{"media1_out mix 0", "media0_in Switch", "media0_in"},
+	{"media1_out mix 0", "media1_in Switch", "media1_in"},
+	{"media1_out mix 0", "media2_in Switch", "media2_in"},
+	{"media1_out mix 0", "media3_in Switch", "media3_in"},
+
+	{"media0_out", NULL, "media0_out mix 0"}, //Play: media0_out mix0 -> media0_out
+	
+	{"media1_out", NULL, "media1_out mix 0"},
+	
+	{"pcm0_in", NULL, "media0_out"},	//Play: media0_out -> pcm0_in
+	
+	{"pcm1_in", NULL, "media1_out"},
+
+	{"Headset Capture", NULL, "pcm1_out"},	//Capt: pcm1_out -> Headset Capture
+	{"Headset Capture", NULL, "pcm2_out"},
+	{"pcm0_out", NULL, "pcm0_out mix 0"},
+	SST_SBA_MIXER_GRAPH_MAP("pcm0_out mix 0"),
+	
+	{"pcm1_out", NULL, "pcm1_out mix 0"},	//Capt: pcm1_out mix0 -> pcm1_out
+	
+	SST_SBA_MIXER_GRAPH_MAP("pcm1_out mix 0"),
+		| { mix_name, "media_loop2_in Switch", "media_loop2_in" } //Capt: media_loop2_in -(via media_loop2_in Switch)-> pcm1_out mix0
+		
+	
+	{"pcm2_out", NULL, "pcm2_out mix 0"},
+	SST_SBA_MIXER_GRAPH_MAP("pcm2_out mix 0"),
+
+	{"media_loop1_in", NULL, "media_loop1_out"},
+	{"media_loop1_out", NULL, "media_loop1_out mix 0"},
+	SST_SBA_MIXER_GRAPH_MAP("media_loop1_out mix 0"),
+	
+	{"media_loop2_in", NULL, "media_loop2_out"},	    //Capt: media_loop2_out -> media_loop2_in
+	{"media_loop2_out", NULL, "media_loop2_out mix 0"}, //Capt: media_loop2_out mix0 -> media_loop2_out
+	
+	SST_SBA_MIXER_GRAPH_MAP("media_loop2_out mix 0"),
+		| { mix_name, "codec_in0 Switch",	"codec_in0" } //Capt: codec_in0 -(via codec_in0 Switch)-> media_loop2_out mix0
+	
+	{"sprot_loop_in", NULL, "sprot_loop_out"},
+	{"sprot_loop_out", NULL, "sprot_loop_out mix 0"},
+	SST_SBA_MIXER_GRAPH_MAP("sprot_loop_out mix 0"),
+
+	{"codec_out0", NULL, "codec_out0 mix 0"}, //Play: codec_out0 mix0 -> codec_out0 #SSP2 TX
+	
+	SST_SBA_MIXER_GRAPH_MAP("codec_out0 mix 0"),
+		| { mix_name, "pcm0_in Switch",	"pcm0_in" }, //Play: pcm0_in -(via pcm0_in Switch)-> codec_out0 mix0
+	
+	{"codec_out1", NULL, "codec_out1 mix 0"},
+	SST_SBA_MIXER_GRAPH_MAP("codec_out1 mix 0"),
+	{"modem_out", NULL, "modem_out mix 0"},
+	SST_SBA_MIXER_GRAPH_MAP("modem_out mix 0"),
+};
+
+
+ess8316.c
+-------------------------------
+Headphone Playback Volume
+Headphone Mixer Volume
+DAC Playback Volume
+DAC Stereo Enhancement
+
+Mic Boost Switch
+ADC Capture Volume
+ADC PGA Gain Volume
+
+
+
+HP Playback
+Headset Playback -> media1_in -(via media1_in Switch)-> media0_out mix0 -> media0_out -> pcm0_in -(via pcm0_in Switch)-> codec_out0 mix0 -> codec_out0 -> SSP2 TX to codec IC
+
+amixer cset name='media0_out mix 0 media1_in Switch' on
+amixer cset name='codec_out0 mix 0 pcm0_in Switch' on
+
+amixer cset name='media1_in Gain 0 Switch' on
+amixer cset name='media1_in Gain 0 Volume' 0
+
+amixer cset name='pcm0_in Gain 0 Switch' on
+amixer cset name='pcm0_in Gain 0 Volume' 0
+
+amixer cset name='codec_out0 Gain 0 Switch' on
+amixer cset name='codec_out0 Gain 0 Volume' 0
+
+
+amixer cset name='DAC Playback Volume' 50%
+amixer sset "Headphone Mixer" 57%,57%
+amixer sset "Headphone" 100%
+
+
+
+HS-Mic
+SSP2 RX from codec IC -> codec_in0 -(via codec_in0 Switch)-> media_loop2_out mix0 -> media_loop2_out -> media_loop2_in -(via media_loop2_in Switch)-> pcm1_out mix0 -> pcm1_out -> Headset Capture
+
+amixer cset name='media_loop2_out mix 0 codec_in0 Switch' on
+amixer cset name='pcm1_out mix 0 media_loop2_in Switch' on
+
+amixer cset name='codec_in0 Gain 0 Switch' on
+amixer cset name='codec_in0 Gain 0 Volume' 0
+
+amixer cset name='media_loop2_out Gain 0 Switch' on
+amixer cset name='media_loop2_out Gain 0 Volume' 0
+
+amixer cset name='pcm1_out Gain 0 Switch' on
+amixer cset name='pcm1_out Gain 0 Volume' 0dB
+

@@ -1,0 +1,228 @@
+# Use case Configuration for bytcht-es8316
+
+SectionVerb {
+	# ALSA PCM
+	Value {
+		# ALSA PCM devices
+		PlaybackPCM "hw:bytchtes8316"
+		CapturePCM "hw:bytchtes8316"
+	}
+
+	EnableSequence [
+		cdev "hw:bytchtes8316"
+		
+		#unused ifaces
+		cset "name='codec_out1 Gain 0 Switch' off"
+		cset "name='codec_in1 Gain 0 Switch' off"
+		
+		#disable unused srcs
+		cset "name='media0_out mix 0 media2_in Switch' off"
+		
+		cset "name='codec_out0 mix 0 codec_in0 Switch' off"
+		cset "name='codec_out0 mix 0 codec_in1 Switch' off"
+		cset "name='codec_out0 mix 0 media_loop1_in Switch' off"
+		cset "name='codec_out0 mix 0 media_loop2_in Switch' off"
+		cset "name='codec_out0 mix 0 modem_in Switch' off"
+		cset "name='codec_out0 mix 0 pcm1_in Switch' off"
+		cset "name='codec_out0 mix 0 sprot_loop_in Switch' off"
+		
+		cset "name='pcm1_out mix 0 codec_in1 Switch' off"
+		cset "name='pcm1_out mix 0 media_loop1_in Switch' off"
+		cset "name='pcm1_out mix 0 media_loop2_in Switch' off"
+		cset "name='pcm1_out mix 0 modem_in Switch' off"
+		cset "name='pcm1_out mix 0 pcm0_in Switch' off"
+		cset "name='pcm1_out mix 0 pcm1_in Switch' off"
+		cset "name='pcm1_out mix 0 sprot_loop_in Switch' off"
+		
+		#disable codec hw input loopback
+		cset "name='Left Headphone Mixer LLIN Switch' off"
+		cset "name='Right Headphone Mixer RLIN Switch' off"
+		
+		
+		#Headset Playback
+		# -> media1_in -(via media1_in Switch)-> media0_out mix0 -> media0_out
+		# -> pcm0_in -(via pcm0_in Switch)-> codec_out0 mix0 -> codec_out0
+		# -> SSP2 TX to codec IC
+		
+		#SoC routing
+		cset "name='media0_out mix 0 media0_in Switch' on"	#Compress playback
+		cset "name='media0_out mix 0 media1_in Switch' on"	#HS playback
+		cset "name='media0_out mix 0 media3_in Switch' on"	#Deepbuff playback
+		cset "name='codec_out0 mix 0 pcm0_in Switch' on"
+		
+		#Digital domain controls (SoC part)
+		cset "name='media0_in Gain 0 Ramp Delay' 50"
+		cset "name='media0_in Gain 0 Volume' 0"
+		cset "name='media0_in Gain 0 Switch' on"
+		
+		cset "name='media1_in Gain 0 Ramp Delay' 50"
+		cset "name='media1_in Gain 0 Volume' 0"
+		cset "name='media1_in Gain 0 Switch' on"
+		
+		cset "name='media3_in Gain 0 Ramp Delay' 50"
+		cset "name='media3_in Gain 0 Volume' 0"
+		cset "name='media3_in Gain 0 Switch' on"
+		
+		cset "name='pcm0_in Gain 0 Ramp Delay' 50"
+		cset "name='pcm0_in Gain 0 Volume' 0"
+		cset "name='pcm0_in Gain 0 Switch' on"
+		cset "name='codec_out0 Gain 0 Ramp Delay' 50"
+		cset "name='codec_out0 Gain 0 Volume' 0"
+		cset "name='codec_out0 Gain 0 Switch' on"
+		
+		#Codec DAC routing
+		cset "name='Left Headphone Mixer Left DAC Switch' on"
+		cset "name='Right Headphone Mixer Right DAC Switch' on"
+		
+		#Analog domain
+		cset "name='Headphone Mixer Volume' 4"	#[0-7], maximum no-clipping value is 4 (57%, -6dB)
+		cset "name='Headphone Playback Volume' 3"	#[0-3]
+		
+		#This should be used as master vol
+		cset "name='DAC Playback Volume' 75%"
+		
+		
+		#SSP2 RX from codec IC
+		# -> codec_in0 -(via codec_in0 Switch)-> pcm1_out mix0 -> pcm1_out
+		# -> Headset Capture
+		
+		#routing
+		cset "name='pcm1_out mix 0 codec_in0 Switch' on"
+		
+		#Digital domain controls
+		cset "name='pcm1_out Gain 0 Ramp Delay' 50"
+		cset "name='pcm1_out Gain 0 Volume' 0"
+		cset "name='pcm1_out Gain 0 Switch' on"
+		cset "name='codec_in0 Gain 0 Ramp Delay' 50"
+		cset "name='codec_in0 Gain 0 Volume' 0"
+		cset "name='codec_in0 Gain 0 Switch' on"
+		
+		#Codec part
+		cset "name='ADC PGA Gain Volume' 70%"	#[0-10]
+		cset "name='Mic Boost Switch' on"
+		
+		#This should be used as master vol
+		cset "name='ADC Capture Volume' 100%"
+	]
+
+	DisableSequence [
+		cdev "hw:bytchtes8316"
+		
+		cset "name='media0_out mix 0 media0_in Switch' off"
+		cset "name='media0_out mix 0 media1_in Switch' off"
+		cset "name='media0_out mix 0 media3_in Switch' off"
+		cset "name='codec_out0 mix 0 pcm0_in Switch' off"
+		
+		cset "name='media0_in Gain 0 Switch' off"
+		cset "name='media1_in Gain 0 Switch' off"
+		cset "name='media3_in Gain 0 Switch' off"
+		
+		cset "name='pcm0_in Gain 0 Switch' off"
+		cset "name='codec_out0 Gain 0 Switch' off"
+		
+		cset "name='pcm1_out mix 0 codec_in0 Switch' off"
+		
+		cset "name='pcm1_out Gain 0 Switch' off"
+		cset "name='codec_in0 Gain 0 Switch' off"
+		
+		cset "name='Headphone Mixer Volume' 0"
+		cset "name='ADC PGA Gain Volume' 0%"
+		cset "name='Mic Boost Switch' off"
+	]
+}
+
+#TBD
+#Codec IC has only 1 analog out, switching SPK/HP is done externally,
+#probably by means of some analog switch controlled by gpio
+
+#SectionDevice."Speakers" {
+#	Comment "Speakers"
+#
+#	Value {
+#		PlaybackChannels "2"
+#	}
+#
+#	ConflictingDevice [
+#		"Headphones"
+#	]
+#
+#	EnableSequence [
+#		cdev "hw:bytchtes8316"
+#	]
+#
+#	DisableSequence [
+#		cdev "hw:bytchtes8316"
+#	]
+#}
+
+#SectionDevice."Headphones".0 {
+#	Comment "Headphones"
+#
+#	Value {
+#		PlaybackChannels "2"
+#		JackControl "Headphone Jack"
+#		JackHWMute "Speakers"
+#	}
+#
+#	ConflictingDevice [
+#		"Speakers"
+#	]
+#
+#	EnableSequence [
+#		cdev "hw:bytchtes8316"
+#	]
+#
+#	DisableSequence [
+#		cdev "hw:bytchtes8316"
+#	]
+#}
+
+SectionDevice."IntMic".0 {
+	Comment "Internal Microphone"
+
+	Value {
+		CaptureChannels "1"
+		CapturePriority "150"
+	}
+	
+	ConflictingDevice [
+		"HSMic"
+	]
+
+	EnableSequence [
+		cdev "hw:bytchtes8316"
+
+		cset "name='Differential Mux' 'lin2-rin2'"
+	]
+
+	DisableSequence [
+		cdev "hw:bytchtes8316"
+	]
+}
+
+SectionDevice."HSMic".0 {
+	Comment "Headset Microphone"
+
+	Value {
+		CaptureChannels "1"
+		#JackControl "Headset Mic Jack"
+		#JackHWMute "Mic"
+	}
+	
+	ConflictingDevice [
+		"IntMic"
+	]
+
+	EnableSequence [
+		cdev "hw:bytchtes8316"
+		
+		cset "name='Differential Mux' 'lin1-rin1'"
+
+	]
+
+	DisableSequence [
+		cdev "hw:bytchtes8316"
+	]
+}
+
+
