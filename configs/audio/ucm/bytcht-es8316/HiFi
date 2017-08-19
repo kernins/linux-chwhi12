@@ -75,11 +75,11 @@ SectionVerb {
 		cset "name='Right Headphone Mixer Right DAC Switch' on"
 		
 		#Analog domain
-		cset "name='Headphone Mixer Volume' 4"	#[0-7], maximum no-clipping value is 4 (57%, -6dB)
+		cset "name='Headphone Mixer Volume' 3"	#[0-7], maximum no-clipping value is 4 (57%, -6dB)
 		cset "name='Headphone Playback Volume' 3"	#[0-3]
 		
 		#This should be used as master vol
-		cset "name='DAC Playback Volume' 75%"
+		cset "name='DAC Playback Volume' 85%"
 		
 		
 		#SSP2 RX from codec IC
@@ -98,11 +98,11 @@ SectionVerb {
 		cset "name='codec_in0 Gain 0 Switch' on"
 		
 		#Codec part
-		cset "name='ADC PGA Gain Volume' 70%"	#[0-10]
+		cset "name='ADC PGA Gain Volume' 80%"	#[0-10]
 		cset "name='Mic Boost Switch' on"
 		
 		#This should be used as master vol
-		cset "name='ADC Capture Volume' 100%"
+		cset "name='ADC Capture Volume' 90%"
 	]
 
 	DisableSequence [
