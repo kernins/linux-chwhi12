@@ -1,0 +1,107 @@
+╔═════════════════════════════════════════════════════════════════════════════════╗
+║ TUX 4 UBUNTU - TUX REFIND THEME                   © 2016 Tux4Ubuntu Initiative  ║
+║ Let's bring Tux to Ubuntu                        http://tux4ubuntu.blogspot.com ║
+╠═════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                 ║
+║   Ubuntu is nice but it needs a little Tux. Here he is, the man himself in      ║
+║   the boot loader as a rEFInd theme. If you don't run on a EFI system, see      ║
+║   our website for further instructions.                                         ║
+║                                                                                 ║
+║   Read more and support our cause at <http://tux4ubuntu.blogspot.com>           ║
+║                                                                                 ║
+╚═════════════════════════════════════════════════════════════════════════════════╝
+
+INSTALL INSTRUCTIONS
+        
+    For the latest version and install instructions visit:
+    <http://tux4ubuntu.blogspot.com/2016/11/tux-boot-loader-theme-for-ubuntu-refind.html>
+
+LICENSE - The MIT License
+
+    Copyright (c) 2016 Tux4Ubuntu Initiative <http://tux4ubuntu.blogspot.com>
+
+    Permission is hereby granted, free of charge, 
+    to any person obtaining a copy of this software and 
+    associated documentation files (the "Software"), to 
+    deal in the Software without restriction, including 
+    without limitation the rights to use, copy, modify, 
+    merge, publish, distribute, sublicense, and/or sell 
+    copies of the Software, and to permit persons to whom 
+    the Software is furnished to do so, 
+    subject to the following conditions:
+
+    The above copyright notice and this permission notice 
+    shall be included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, 
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES 
+    OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. 
+    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR 
+    ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, 
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+CREDITS AND ATTRIBUTION
+    ╔═════════════════════════════════════════════════════════════════════════════╗
+    ║ We try not to infringe on any copyrights, but contact us if you see         ║
+    ║ anything that we and our users are not allowed to use on their own          ║
+    ║ individual computers and we will remove it as soon as we can.               ║
+    ╚═════════════════════════════════════════════════════════════════════════════╝
+
+    THEME written and designed by:
+        Tuxedo Joe <http://github.com/tuxedojoe> for Tux4Ubuntu Initiative <http://tux4ubuntu.blogspot.com>. 
+        Based on the rEFInd OS X theme created by: naymlexwun <http://naymlezwun.deviantart.com/art/rEFInd-OS-X-Theme-469807750>
+        License: Creative Commons Attribution - Noncommercial 3.0 License <http://creativecommons.org/licenses/by-nc/3.0/>
+
+    TUX ILLUSTRATION by:
+        Larry Ewing, at: <http://isc.tamu.edu/~lewing/linux/>
+        Redrawn in Inkscape by: Garrett LeSage: <https://github.com/garrett/Tux>
+        License: Public domain <http://creativecommons.org/publicdomain/zero/1.0/>
+
+    FONT AND GREY BACKGROUND COLOR CODE created by:
+        naymlexwun <http://naymlezwun.deviantart.com/art/rEFInd-OS-X-Theme-469807750>
+        License: Creative Commons Attribution - Noncommercial 3.0 License <http://creativecommons.org/licenses/by-nc/3.0/>
+
+    BASE HDD ICON created and designed by:
+        Tuxedo Joe <http://github.com/tuxedojoe> for Tux4Ubuntu Initiative <http://tux4ubuntu.blogspot.com>. 
+        Inspired by the Sleek Aluminium Hard Drive tutorial at: Design Instruct <http://designinstruct.com/graphic-design/how-to-make-a-sleek-aluminium-hard-drive-in-photoshop/>
+        LED light design was created and modified from the original files created by NTDesign shown in this video: <https://www.youtube.com/watch?v=EvmVUZx-nZo>
+
+    ARROWS, FUNCTIONALITIES AND TOOLS ICONS created and designed by:
+        Tuxedo Joe <http://github.com/tuxedojoe> for Tux4Ubuntu Initiative <http://tux4ubuntu.blogspot.com>. 
+        Inspired by icons used by rEFInd project, which in turn took them from AwOken 2.5:
+        - The AwOken 2.5 icon set
+        - Source: http://alecive.deviantart.com/art/AwOken-163570862
+        - Copyright (c) 2013 by Alessandro Roncone (aka alecive on DeviantArt)
+        - License: Creative Commons Attribution-Share Alike 3.0 (CC-SA 3.0)
+
+        Except for the func_csr_rotate.png were the outlines were taken from this free to use icon: http://www.freeiconspng.com/free-images/shield-png-23097 
+
+        An apple and a flag is used to represent Apple's rescue tools and Microsoft Windows' rescue tool. If by any chance,
+        Apple, or Microsoft should argue this is copyright infringement (We're looking at you Apple) we will happily remove these icons.
+
+    PNG ICONS ON TOP OF HDD BASE, if not specified below, are created by:
+        Gustavo Castro <https://github.com/gustawho>
+        Found here: https://github.com/gustawho/grub2-theme-breeze/tree/master/breeze/icons
+        License: Creative Commons Attribution-ShareAlike 3.0 License <https://github.com/gustawho/grub2-theme-breeze/blob/master/LICENSE>
+
+        - CLOVER, NETWORK, LEGACY, HWTEST, GUMMIBOOT AND CRUNCHBAG OS ICONS PNGS were recieved from the standard rEFInd theme created by:
+        Roderick W. Smith <https://sourceforge.net/u/srs5694/profile/> and others contributing to the rEFInd project.
+        Found here:  https://sourceforge.net/projects/refind/      
+        License: Specified in the README file inside the "icons"-folder in the rEFInd project version 0.10.4 <https://sourceforge.net/projects/refind/files/latest/download?source=files>
+
+        - MACOS is a trademark of Apple Inc. To ensure not using the original logo Apple is using for their OS, the icon were instead created by typing macOS with Arial, and squeezing the "OS" part a bit.
+        
+        - MANDRIVA icon was found here <https://upload.wikimedia.org/wikipedia/en/3/34/Mandriva-Logo.svg>
+        
+        - HAIKU icon was found here <http://cgit.haiku-os.org/haiku/plain/data/artwork/HAIKU%20logo%20-%20black.svg>
+
+        - FRUGALWARE icon was found here: <http://frugalware.org/>
+
+        - GOOGLE CHROME icon was created by <Icomoon> found here: <http://www.flaticon.com/free-icon/chrome_23689>
+
+        - DRAGON FLY icon from: <https://upload.wikimedia.org/wikipedia/en/thumb/2/2a/DragonFly_BSD_Logo_svg.svg/1280px-DragonFly_BSD_Logo_svg.svg.png>
+
+        - OPENBSD icon from <https://www.shareicon.net/openbsd-102884>
+
+        All these icons has been modified in size and color overlay to conform to a united design.

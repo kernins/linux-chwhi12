@@ -1,0 +1,29 @@
+diff -r c8a27368afd4 refind/menu.c
+--- a/refind/menu.c	Wed Aug 16 01:29:45 2017 +0300
++++ b/refind/menu.c	Wed Aug 16 01:31:19 2017 +0300
+@@ -536,16 +536,20 @@
+         if (!PointerActive) { // react to key press
+             switch (key.ScanCode) {
+                 case SCAN_UP:
++                    //UpdateScroll(&State, SCROLL_LINE_UP);
++                    UpdateScroll(&State, SCROLL_LINE_LEFT);
++                    break;
++                case SCAN_LEFT:
++                    //UpdateScroll(&State, SCROLL_LINE_LEFT);
+                     UpdateScroll(&State, SCROLL_LINE_UP);
+                     break;
+-                case SCAN_LEFT:
+-                    UpdateScroll(&State, SCROLL_LINE_LEFT);
+-                    break;
+                 case SCAN_DOWN:
+-                    UpdateScroll(&State, SCROLL_LINE_DOWN);
++                    //UpdateScroll(&State, SCROLL_LINE_DOWN);
++                    UpdateScroll(&State, SCROLL_LINE_RIGHT);
+                     break;
+                 case SCAN_RIGHT:
+-                    UpdateScroll(&State, SCROLL_LINE_RIGHT);
++                    //UpdateScroll(&State, SCROLL_LINE_RIGHT);
++                    UpdateScroll(&State, SCROLL_LINE_DOWN);
+                     break;
+                 case SCAN_HOME:
+                     UpdateScroll(&State, SCROLL_FIRST);

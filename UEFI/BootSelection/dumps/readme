@@ -1,0 +1,8 @@
+1.initial						OS selection menu active
+2.after_win_dsbl_menu				Disabled menu via vendor windows utility
+3.after_win_boot					Rebooted to win, returned to lin. Value changed to 0x00
+4.sw_to_droid_from_win				Rebooted to win, requested switch to droid via vendor utility, manually booted into lin instead
+5.rebooted_to_droid				Rebooted to droid, returned to lin
+6.after_several_lin_and_droid_boots		After several lin & droid boots it seem to settle on 0x3a
+
+Note: first 4 bytes is a header

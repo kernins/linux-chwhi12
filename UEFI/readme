@@ -1,0 +1,14 @@
+Frankly speaking, Hi12 firmware is a piece of crap. Among other numerous issues, particularly in ACPI tables, it has following boot-related ones:
+	* doesn't respect BootOrder var, just resets it to hardcoded value on each reboot
+	* has a bad habit of resetting EFI boot entries to fw-hardcoded ones from time to time, wiping all custom entries added by user
+	* uses removable media path for android boot loader, which is just bad design
+	
+For now I'm going the simplest route possible:
+	* disabling stock OSSelection menu via BootSelectVariable-944fb13b-773f-4cbb-9c6f-326cebde4c23, and setting it to always boot "Android-IA", which is hardcoded to /EFI/BOOT/bootx64.efi
+	* moving actual android bootloader to another location and adding an entry for it into rEFInd menu
+	* moving rEFIng binary in place of android loader, to be executed by default
+	* patching rEFInd so that volume up/down keys are treated as left/right
+	
+	
+ESP dir represents my current ESP part contents just for convenience.
+rEFInd binary is 0.11.0 volkeys-patched & built on gnu-efi
