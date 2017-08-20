@@ -437,7 +437,7 @@ static irqreturn_t goodix_ts_irq_handler(int irq, void *dev_id)
 {
 	struct goodix_ts_data *ts = (struct goodix_ts_data *)dev_id;
 
-	dev_dbg(&ts->client->dev, "goodix_ts_irq_handler(%u) / users %u\n", irq, ts->input_dev->users);
+	dev_dbg(&ts->client->dev, "goodix_ts_irq_handler: inpdev users: %u\n", ts->input_dev->users);
 	//goodix_dump_gpio_state(ts, "irq-hndl");
 
 	goodix_process_events(ts);
@@ -456,12 +456,17 @@ static void goodix_free_irq(struct goodix_ts_data *ts)
 
 static int goodix_request_irq(struct goodix_ts_data *ts)
 {
-	dev_dbg(&ts->client->dev, "goodix_request_irq(%u), type %u\n", ts->client->irq, irq_get_trigger_type(ts->client->irq));
-	goodix_dump_gpio_state(ts, "req-irq");
+	int error;
 
-	return devm_request_threaded_irq(&ts->client->dev, ts->client->irq,
+	dev_dbg(&ts->client->dev, "goodix_request_irq(%u), flags %lu\n", ts->client->irq, ts->irq_flags);
+
+	error = devm_request_threaded_irq(&ts->client->dev, ts->client->irq,
 					 NULL, goodix_ts_irq_handler,
 					 ts->irq_flags, ts->client->name, ts);
+	if (error) {
+		dev_err(&ts->client->dev, "Failed to acquire IRQ#%u with flags %lu: %d\n", ts->client->irq, ts->irq_flags, error);
+	}
+	return error;
 }
 
 static int goodix_read_cfg(struct goodix_ts_data *ts, u8 *buf)
@@ -674,6 +679,8 @@ static int goodix_get_gpio_config(struct goodix_ts_data *ts)
 			return error;
 		ts->inverted_gpios = true;
 		dev_dbg(dev, "Applying gpios quirk\n");
+	} else {
+		ts->inverted_gpios = false;
 	}
 
 	/* Get the interrupt GPIO pin number */
@@ -860,14 +867,7 @@ static int goodix_configure_dev(struct goodix_ts_data *ts)
 		return error;
 
 	ts->irq_flags = goodix_irq_flags[ts->int_trigger_type] | IRQF_ONESHOT;
-	dev_info(&ts->client->dev, "IRQ trig type %u, flags %lu\n", ts->int_trigger_type, ts->irq_flags);
-	error = goodix_request_irq(ts); //TODO: request only after inpdev open()?
-	if (error) {
-		dev_err(&ts->client->dev, "request IRQ failed: %d\n", error);
-		return error;
-	}
-
-	return 0;
+	return goodix_request_irq(ts); //TODO: request only after inpdev open()?
 }
 
 static void _goodix_remove_sysfs_grp_cb(void *data)
@@ -977,13 +977,13 @@ static int goodix_ts_probe(struct i2c_client *client)
 		dev_err(&client->dev, "Failed to create sysfs group: %d\n", error);
 		return error;
 	}
-
 	error = devm_add_action(&client->dev, _goodix_remove_sysfs_grp_cb, &client->dev);
 	if (error) {
 		dev_err(&client->dev, "Failed to register remove_sysfs_grp() action in devres: %d\n", error);
 		_goodix_remove_sysfs_grp_cb(&client->dev);
 		return error;
 	}
+
 	return 0;
 }
 
@@ -994,46 +994,43 @@ static int __maybe_unused goodix_runtime_suspend(struct device *dev)
 	int error;
 
 	dev_dbg(dev, "goodix_runtime_suspend: hwsusp: %u\n", ts->suspended);
-	goodix_dump_gpio_state(ts, "PM-S");
 
-	if (ts->gpiod_int) {
-		mutex_lock(&ts->mutex);
+	//INT pin is required for sleep/wakeup sequences
+	if (!ts->gpiod_int)
+		return -EIO;
 
-		if (ts->suspended)
-			goto out;
+	mutex_lock(&ts->mutex);
+	if (ts->suspended)
+		goto out;
 
-		/* Free IRQ as IRQ pin is used as output in the suspend sequence */
-		goodix_free_irq(ts);
-
-		/* Output LOW on the INT pin for 5 ms */
-		error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
-		if (error) {
-			dev_err(&ts->client->dev, "goodix_runtime_suspend(): failed to change gpio_int to out: %d\n", error);
-			goto out_error;
-		}
-
-		usleep_range(5000, 6000);
-		goodix_dump_gpio_state(ts, "PM-S-be4-cmd");
-
-		error = goodix_i2c_write_u8(ts->client, GOODIX_REG_COMMAND, GOODIX_CMD_SCREEN_OFF);
-		if (error) {
-			dev_err(&ts->client->dev, "goodix_runtime_suspend(): screen off command failed: %d\n", error);
-			gpiod_direction_input(ts->gpiod_int);
-			error = -EAGAIN;
-			goto out_error;
-		}
-
-		/*
-	 	* The datasheet specifies that the interval between sending screen-off
-	 	* command and wake-up should be longer than 58 ms. To avoid waking up
-	 	* sooner, delay 58ms here.
-	 	*/
-		msleep(58);
-	
-		ts->suspended = true;
-out:
-		mutex_unlock(&ts->mutex);
+	/* Free IRQ as IRQ pin is used as output in the suspend sequence */
+	goodix_free_irq(ts);
+	/* Output LOW on the INT pin for 5 ms */
+	error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
+	if (error) {
+		dev_err(&ts->client->dev, "goodix_runtime_suspend(): failed to change gpio_int to out_lo: %d\n", error);
+		goto out_error;
 	}
+	usleep_range(5000, 6000);
+
+	error = goodix_i2c_write_u8(ts->client, GOODIX_REG_COMMAND, GOODIX_CMD_SCREEN_OFF);
+	if (error) {
+		dev_err(&ts->client->dev, "goodix_runtime_suspend(): screen off command failed: %d\n", error);
+		gpiod_direction_input(ts->gpiod_int);
+		error = -EAGAIN;
+		goto out_error;
+	}
+
+	/*
+	 * The datasheet specifies that the interval between sending screen-off
+	 * command and wake-up should be longer than 58 ms. To avoid waking up
+	 * sooner, delay 58ms here.
+	 */
+	msleep(58);
+	ts->suspended = true;
+
+out:
+	mutex_unlock(&ts->mutex);
 	return 0;
 
 out_error:
@@ -1049,43 +1046,39 @@ static int __maybe_unused goodix_runtime_resume(struct device *dev)
 	int error = 0;
 
 	dev_dbg(dev, "goodix_runtime_resume: hwsusp: %u\n", ts->suspended);
-	goodix_dump_gpio_state(ts, "PM-R");
 
-	if (ts->gpiod_int) {
-		mutex_lock(&ts->mutex);
+	//INT pin is required for sleep/wakeup sequences
+	if (!ts->gpiod_int)
+		return -EIO;
 
-		if (!ts->suspended)
-			goto out;
+	mutex_lock(&ts->mutex);
+	if (!ts->suspended)
+		goto out;
 
-		//Exit sleep mode by outputting HIGH level to INT pin for 2ms~5ms.
-		error = gpiod_direction_output(ts->gpiod_int, 1 ^ ts->inverted_gpios);
-		if (error) {
-			dev_err(&ts->client->dev, "goodix_runtime_resume(): failed to change gpio_int to out: %d\n", error);
-			goto out;
-		}
-
-		usleep_range(2000, 5000);
-
-		goodix_dump_gpio_state(ts, "PM-R-INTHI");
-
-		/* Despite datasheet doesn't specify OUT-LOW + msleep(50) sequence for wakeup
-		 * it is actually necessary, at least on my ChuwiHi12 (GT9111) */
-		error = goodix_int_sync(ts);
-		if (error) {
-			dev_err(&ts->client->dev, "goodix_runtime_resume(): goodix_int_sync() failed: %d\n", error);
-			goto out;
-		}
-
-		error = goodix_request_irq(ts);
-		if (error) {
-			dev_err(&ts->client->dev, "goodix_runtime_resume(): failed to aquire IRQ: %d\n", error);
-			goto out;
-		}
-
-		ts->suspended = false;
-out:
-		mutex_unlock(&ts->mutex);
+	//Exit sleep mode by outputting HIGH level to INT pin for 2ms~5ms.
+	error = gpiod_direction_output(ts->gpiod_int, 1 ^ ts->inverted_gpios);
+	if (error) {
+		dev_err(&ts->client->dev, "goodix_runtime_resume(): failed to change gpio_int to out_hi: %d\n", error);
+		goto out;
 	}
+	usleep_range(2000, 5000);
+
+	/* Despite datasheet doesn't specify OUT-LOW + msleep(50) sequence for wakeup
+	 * it is actually necessary, at least on my ChuwiHi12 (GT9111) */
+	error = goodix_int_sync(ts);
+	if (error) {
+		dev_err(&ts->client->dev, "goodix_runtime_resume(): goodix_int_sync() failed: %d\n", error);
+		goto out;
+	}
+
+	error = goodix_request_irq(ts);
+	if (error)
+		goto out;
+
+	ts->suspended = false;
+
+out:
+	mutex_unlock(&ts->mutex);
 	return error;
 }
 
