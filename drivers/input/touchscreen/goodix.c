@@ -997,7 +997,7 @@ static int __maybe_unused goodix_runtime_suspend(struct device *dev)
 
 	//INT pin is required for sleep/wakeup sequences
 	if (!ts->gpiod_int)
-		return -EIO;
+		return -ENOSYS;
 
 	mutex_lock(&ts->mutex);
 	if (ts->suspended)
@@ -1049,7 +1049,7 @@ static int __maybe_unused goodix_runtime_resume(struct device *dev)
 
 	//INT pin is required for sleep/wakeup sequences
 	if (!ts->gpiod_int)
-		return -EIO;
+		return -ENOSYS;
 
 	mutex_lock(&ts->mutex);
 	if (!ts->suspended)
