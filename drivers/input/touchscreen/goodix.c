@@ -53,7 +53,6 @@ struct goodix_ts_data {
 	const char *cfg_name;
 	unsigned long irq_flags;
 	bool suspended;
-	atomic_t inpdev_busy;			//whether input_dev is currently being consumed by some userspace proc(s)
 	struct mutex mutex;				//Protects power management calls and access to suspended flag 
 };
 
@@ -266,9 +265,7 @@ static void _goodix_rpm_disable_cb(void *data)
 	 * and wait for PM ops currently in progress to complete before disabling RPM callbacks */
 	pm_runtime_barrier(dev);
 	pm_runtime_disable(dev);
-
 	pm_runtime_dont_use_autosuspend(dev);
-	pm_runtime_set_suspended(dev);
 }
 
 static int goodix_rpm_enable(struct device *dev)
@@ -293,6 +290,7 @@ static int goodix_rpm_enable(struct device *dev)
 	if (error) {
 		dev_err(dev, "Failed to register rpm_disable() action in devres: %d\n", error);
 		_goodix_rpm_disable_cb(dev);
+		pm_runtime_set_suspended(dev);
 		return error;
 	}
 	return 0;
@@ -749,18 +747,9 @@ static int goodix_read_version(struct goodix_ts_data *ts)
 static int goodix_inpdev_open(struct input_dev *input_dev)
 {
 	struct goodix_ts_data *ts = input_get_drvdata(input_dev);
-	int error;
 
 	dev_dbg(&ts->client->dev, "goodix_inpdev_open()\n");
-
-	error = goodix_rpm_hold_active(&ts->client->dev);
-	if (error)
-		return error;
-	
-	/* open/close callbacks are invoked for
-	 * the very first/last consumers only */
-	atomic_set(&ts->inpdev_busy, 1);
-	return 0;
+	return goodix_rpm_hold_active(&ts->client->dev);
 }
 
 static void goodix_inpdev_close(struct input_dev *input_dev)
@@ -768,9 +757,7 @@ static void goodix_inpdev_close(struct input_dev *input_dev)
 	struct goodix_ts_data *ts = input_get_drvdata(input_dev);
 
 	dev_dbg(&ts->client->dev, "goodix_inpdev_close()\n");
-
 	goodix_rpm_release_active(&ts->client->dev);
-	atomic_set(&ts->inpdev_busy, 0);
 }
 
 /**
@@ -1000,13 +987,13 @@ static int goodix_ts_probe(struct i2c_client *client)
 	return 0;
 }
 
-static int __maybe_unused goodix_sleep(struct device *dev)
+static int __maybe_unused goodix_runtime_suspend(struct device *dev)
 {
 	struct i2c_client *client = i2c_verify_client(dev);
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 	int error;
 
-	dev_dbg(dev, "goodix_sleep(%u)\n", ts->suspended);
+	dev_dbg(dev, "goodix_runtime_suspend: hwsusp: %u\n", ts->suspended);
 	goodix_dump_gpio_state(ts, "PM-S");
 
 	if (ts->gpiod_int) {
@@ -1021,7 +1008,7 @@ static int __maybe_unused goodix_sleep(struct device *dev)
 		/* Output LOW on the INT pin for 5 ms */
 		error = gpiod_direction_output(ts->gpiod_int, 0 ^ ts->inverted_gpios);
 		if (error) {
-			dev_err(&ts->client->dev, "sleep(): failed to change gpio_int to out: %d\n", error);
+			dev_err(&ts->client->dev, "goodix_runtime_suspend(): failed to change gpio_int to out: %d\n", error);
 			goto out_error;
 		}
 
@@ -1030,7 +1017,7 @@ static int __maybe_unused goodix_sleep(struct device *dev)
 
 		error = goodix_i2c_write_u8(ts->client, GOODIX_REG_COMMAND, GOODIX_CMD_SCREEN_OFF);
 		if (error) {
-			dev_err(&ts->client->dev, "sleep(): screen off command failed: %d\n", error);
+			dev_err(&ts->client->dev, "goodix_runtime_suspend(): screen off command failed: %d\n", error);
 			gpiod_direction_input(ts->gpiod_int);
 			error = -EAGAIN;
 			goto out_error;
@@ -1055,13 +1042,13 @@ out_error:
 	return error;
 }
 
-static int __maybe_unused goodix_wakeup(struct device *dev)
+static int __maybe_unused goodix_runtime_resume(struct device *dev)
 {
 	struct i2c_client *client = i2c_verify_client(dev);
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 	int error = 0;
 
-	dev_dbg(dev, "goodix_wakeup(%u)\n", ts->suspended);
+	dev_dbg(dev, "goodix_runtime_resume: hwsusp: %u\n", ts->suspended);
 	goodix_dump_gpio_state(ts, "PM-R");
 
 	if (ts->gpiod_int) {
@@ -1073,7 +1060,7 @@ static int __maybe_unused goodix_wakeup(struct device *dev)
 		//Exit sleep mode by outputting HIGH level to INT pin for 2ms~5ms.
 		error = gpiod_direction_output(ts->gpiod_int, 1 ^ ts->inverted_gpios);
 		if (error) {
-			dev_err(&ts->client->dev, "wakeup(): failed to change gpio_int to out: %d\n", error);
+			dev_err(&ts->client->dev, "goodix_runtime_resume(): failed to change gpio_int to out: %d\n", error);
 			goto out;
 		}
 
@@ -1085,13 +1072,13 @@ static int __maybe_unused goodix_wakeup(struct device *dev)
 		 * it is actually necessary, at least on my ChuwiHi12 (GT9111) */
 		error = goodix_int_sync(ts);
 		if (error) {
-			dev_err(&ts->client->dev, "wakeup(): goodix_int_sync() failed: %d\n", error);
+			dev_err(&ts->client->dev, "goodix_runtime_resume(): goodix_int_sync() failed: %d\n", error);
 			goto out;
 		}
 
 		error = goodix_request_irq(ts);
 		if (error) {
-			dev_err(&ts->client->dev, "wakeup(): failed to aquire IRQ: %d\n", error);
+			dev_err(&ts->client->dev, "goodix_runtime_resume(): failed to aquire IRQ: %d\n", error);
 			goto out;
 		}
 
@@ -1102,19 +1089,36 @@ out:
 	return error;
 }
 
+//TODO: remove this completely after testing, assign pm_runtime_force_suspend|resume directly as a callbacks
+static int __maybe_unused goodix_sleep(struct device *dev)
+{
+	struct i2c_client *client = i2c_verify_client(dev);
+	struct goodix_ts_data *ts = i2c_get_clientdata(client);
+	int ret;
+
+	dev_dbg(dev, "goodix_sleep: users: %u/%u\n", ts->input_dev->users, atomic_read(&dev->power.usage_count));
+
+	ret = pm_runtime_force_suspend(dev);
+	dev_dbg(dev, "goodix_sleep: force_suspend: %d / suspended: %u\n", ret, pm_runtime_status_suspended(dev));
+	return ret;
+}
+
 static int __maybe_unused goodix_resume(struct device *dev)
 {
 	struct i2c_client *client = i2c_verify_client(dev);
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
+	int ret;
 
-	dev_dbg(dev, "goodix_resume(%d)\n", atomic_read(&ts->inpdev_busy));
+	dev_dbg(dev, "goodix_resume: users: %u/%u\n", ts->input_dev->users, atomic_read(&dev->power.usage_count));
 
-	return atomic_read(&ts->inpdev_busy)? goodix_wakeup(dev) : 0;
+	ret = pm_runtime_force_resume(dev);
+	dev_dbg(dev, "goodix_resume: force_resume: %d / suspended: %u\n", ret, pm_runtime_status_suspended(dev));
+	return ret;
 }
 
 static const struct dev_pm_ops goodix_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(goodix_sleep, goodix_resume)
-	SET_RUNTIME_PM_OPS(goodix_sleep, goodix_wakeup, NULL)
+	SET_RUNTIME_PM_OPS(goodix_runtime_suspend, goodix_runtime_resume, NULL)
 };
 
 static const struct i2c_device_id goodix_ts_id[] = {
