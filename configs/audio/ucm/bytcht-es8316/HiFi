@@ -45,15 +45,15 @@ SectionVerb {
 		# -> SSP2 TX to codec IC
 		
 		#SoC routing
-		cset "name='media0_out mix 0 media0_in Switch' on"	#Compress playback
+		cset "name='media0_out mix 0 media0_in Switch' off"	#Compress playback, default-disabled
 		cset "name='media0_out mix 0 media1_in Switch' on"	#HS playback
-		cset "name='media0_out mix 0 media3_in Switch' on"	#Deepbuff playback
+		cset "name='media0_out mix 0 media3_in Switch' off"	#Deepbuff playback, default-disabled
 		cset "name='codec_out0 mix 0 pcm0_in Switch' on"
 		
 		#Digital domain controls (SoC part)
 		cset "name='media0_in Gain 0 Ramp Delay' 50"
 		cset "name='media0_in Gain 0 Volume' 0"
-		cset "name='media0_in Gain 0 Switch' on"
+		cset "name='media0_in Gain 0 Switch' off"
 		
 		cset "name='media1_in Gain 0 Ramp Delay' 50"
 		cset "name='media1_in Gain 0 Volume' 0"
@@ -61,7 +61,7 @@ SectionVerb {
 		
 		cset "name='media3_in Gain 0 Ramp Delay' 50"
 		cset "name='media3_in Gain 0 Volume' 0"
-		cset "name='media3_in Gain 0 Switch' on"
+		cset "name='media3_in Gain 0 Switch' off"
 		
 		cset "name='pcm0_in Gain 0 Ramp Delay' 50"
 		cset "name='pcm0_in Gain 0 Volume' 0"
@@ -176,6 +176,30 @@ SectionVerb {
 #		cdev "hw:bytchtes8316"
 #	]
 #}
+
+SectionDevice."DBPlayback".0 {
+	Comment "DeepBuffer Playback"
+
+	Value {
+		PlaybackChannels "2"
+		#JackControl "Headphone Jack"
+		#JackHWMute "Speakers"
+	}
+
+	EnableSequence [
+		cdev "hw:bytchtes8316"
+		
+		cset "name='media0_out mix 0 media3_in Switch' on"
+		cset "name='media3_in Gain 0 Switch' on"
+	]
+
+	DisableSequence [
+		cdev "hw:bytchtes8316"
+		
+		cset "name='media3_in Gain 0 Switch' off"
+		cset "name='media0_out mix 0 media3_in Switch' off"
+	]
+}
 
 SectionDevice."IntMic".0 {
 	Comment "Internal Microphone"
